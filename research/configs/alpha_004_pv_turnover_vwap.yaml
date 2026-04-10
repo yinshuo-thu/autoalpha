@@ -1,0 +1,5 @@
+formula: cs_rank(-(close_trade_px / vwap - 1) * safe_div(dvolume, ts_mean(dvolume,
+    4)))
+postprocess: stable_low_turnover
+preprocess:
+    lookback_days: 5

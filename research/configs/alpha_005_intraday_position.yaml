@@ -1,0 +1,4 @@
+formula: cs_rank(safe_div(close_trade_px - low_trade_px, high_trade_px - low_trade_px))
+postprocess: stable_low_turnover
+preprocess:
+    lookback_days: 5

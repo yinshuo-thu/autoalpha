@@ -1,0 +1,5 @@
+formula: cs_rank(-delta(close_trade_px, 1) * (ts_zscore(ts_std(delta(close_trade_px,
+    1), 16), 32) > 1.5))
+postprocess: stable_low_turnover
+preprocess:
+    lookback_days: 20

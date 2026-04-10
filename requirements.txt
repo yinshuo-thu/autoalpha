@@ -1,0 +1,10 @@
+pandas
+numpy
+pyarrow
+pyyaml
+bottleneck
+numexpr
+flask
+flask-cors
+scipy
+numba

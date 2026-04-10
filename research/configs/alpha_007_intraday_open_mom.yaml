@@ -1,0 +1,4 @@
+formula: cs_rank(safe_div(close_trade_px, open_trade_px) - 1)
+postprocess: aggressive_high_ic
+preprocess:
+    lookback_days: 5

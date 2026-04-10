@@ -1,0 +1,4 @@
+,IC,IR,Turnover,Score,Passed,Formula,PostProcess
+auto_alpha_001,-2.305,-8.2736,2.674,0.0,False,"cs_rank(ts_decay_linear(delta(vwap, 3), 15))",stable_low_turnover
+auto_alpha_002,-0.9112,-7.17,9.9275,0.0,False,"cs_rank(ts_zscore(trade_count, 15))",stable_low_turnover
+auto_alpha_003,-2.5122,-9.0696,2.9269,0.0,False,"cs_rank(ts_decay_linear(delta(close_trade_px, 5) * volume, 10))",stable_low_turnover

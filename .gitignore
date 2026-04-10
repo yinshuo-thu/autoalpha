@@ -1,0 +1,31 @@
+# Data & Cache
+eq_data_stage*
+eq_resp_stage*
+eq_trading_restriction_stage*
+data.pq
+universe/
+cache/
+outputs/*.pq
+research_runs/*.json
+submit/**/*.pq
+
+# Environments
+.conda/
+.venv/
+node_modules/
+
+# Logs
+*.log
+
+# Pycache
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Frontend
+frontend/dist/

@@ -1,0 +1,5 @@
+export_submission: true
+formula: cs_rank(ts_decay_linear(delta(vwap, 3), 15))
+postprocess: stable_low_turnover
+preprocess:
+  lookback_days: 15

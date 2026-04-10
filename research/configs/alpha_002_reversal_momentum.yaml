@@ -1,0 +1,4 @@
+formula: cs_rank(-ts_decay_linear(delta(close_trade_px, 1), 5))
+postprocess: stable_low_turnover
+preprocess:
+    lookback_days: 10

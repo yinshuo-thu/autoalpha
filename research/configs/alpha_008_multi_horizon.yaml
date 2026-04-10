@@ -1,0 +1,4 @@
+formula: cs_rank(-delta(close_trade_px, 1)) + cs_rank(-delta(close_trade_px, 4))
+postprocess: stable_low_turnover
+preprocess:
+    lookback_days: 10

@@ -1,0 +1,5 @@
+formula: cs_rank(sign(delta(close_trade_px, 1)) * safe_div(volume, ts_mean(volume,
+    16)))
+postprocess: aggressive_high_ic
+preprocess:
+    lookback_days: 10
