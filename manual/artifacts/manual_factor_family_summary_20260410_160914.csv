@@ -1,0 +1,17 @@
+family,family_label,pass_count,best_key,best_score,best_ic,best_ir,min_turnover
+range_location,Close Location In Range,1,range_location__base__pro,7.662343044164071,0.0185725584891918,35.40143895653958,11.388956069946287
+range_conditioned_location,Range Location x Range Surprise,2,range_conditioned_location__window8__pro,6.491393641147421,0.0170752972306933,31.586759155723456,10.94854736328125
+wick_imbalance,Wick Imbalance,1,wick_imbalance__base__pro,5.522278459799223,0.0146095818493047,37.66603584645432,11.223273277282717
+zscore_body_fraction,Body Fraction Z-Score,2,zscore_body_fraction__window8__pro,5.348179197410382,0.0140520300720565,45.88924245610388,12.243005752563477
+ema_spread,Short-Long EMA Spread,2,ema_spread__long32_short8__anti,4.993842966189443,0.0211577183130086,5.891727612432481,0.8777076005935669
+open_close_return,Open-Close Return,1,open_close_return__base__pro,3.444572513489917,0.0134581218955017,20.51218757224919,11.705188751220703
+range_conditioned_body,Body x Range Surprise,2,range_conditioned_body__window16__pro,3.081939946462158,0.012686646319425,20.760710532803948,11.845309257507324
+body_fraction,Body Fraction,1,body_fraction__base__pro,2.837204090785992,0.0121234531323887,21.171093966870135,11.914468765258787
+bar_return,Close To Previous Close Return,1,bar_return__base__pro,2.82583708534951,0.0125066838869654,19.15084116480588,12.09870147705078
+avg_trade_conditioned_return,Return x Average Trade Value Surprise,2,avg_trade_conditioned_return__window16__pro,2.8017080456777985,0.0124877389046029,18.691630612757816,12.014753341674805
+close_zscore,Close Z-Score Stretch,2,close_zscore__window24__anti,2.7784200861805672,0.013680693782033,5.469291623504798,3.6005160808563232
+trade_conditioned_return,Return x Trade-Count Surprise,2,trade_conditioned_return__window16__pro,2.6511764436302503,0.012177203316031,18.209572998845875,11.928767204284668
+dvolume_conditioned_return,Return x Dollar-Volume Surprise,2,dvolume_conditioned_return__window16__pro,2.6302414046707985,0.0121774523030276,17.79382983346034,11.88420295715332
+volume_conditioned_return,Return x Volume Surprise,2,volume_conditioned_return__window16__pro,2.618416566018825,0.0121602576856844,17.73008689004751,11.88358211517334
+volatility_conditioned_return,Return / Recent Volatility,2,volatility_conditioned_return__window32__pro,2.04471215281844,0.0109742151889476,17.649767113857056,12.192586898803713
+multi_horizon_mix,1/4/16-Bar Return Mix,1,multi_horizon_mix__base__anti,0.754969522570127,0.0078022765317368,3.12479130731778,7.06276273727417
