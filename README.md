@@ -1,4 +1,4 @@
-# AlphaClaw- Auto Alpha Research Factory
+# Auto Alpha Research Factory
 
 An autonomous quantitative alpha research system built for the **Scientech Labs Equity Alpha Research 2026** competition. It covers the full pipeline: historical price/volume ingestion, factor generation (LLM and/or evolutionary search over a DSL), compliance checks, evaluation (IC / IR / turnover / concentration), local leaderboard storage, and Parquet submission packaging.
 
