@@ -1,5 +1,5 @@
 """
-autoalpha/knowledge_base.py
+autoalpha_v2/knowledge_base.py
 
 Persistent JSON knowledge base for all autoalpha experiments.
 
@@ -45,8 +45,9 @@ _MOTIF_TOKENS = [
     "volume", "trade_count", "dvolume", "vwap",
     "close_trade_px", "high_trade_px", "low_trade_px",
     "ts_mean", "ts_zscore", "ts_rank", "ts_decay_linear",
-    "safe_div", "cs_rank", "cs_zscore", "delta", "lag",
-    "ts_corr", "ts_cov",
+    "ts_ema", "ts_median", "ts_minmax_norm", "safe_div",
+    "cs_rank", "cs_zscore", "cs_neutralize", "delta", "lag",
+    "ts_corr", "ts_cov", "ifelse", "gt", "lt",
 ]
 
 _FIELD_NAMES = [
@@ -56,9 +57,15 @@ _FIELD_NAMES = [
 
 _ALL_OPS = [
     "ts_decay_linear", "ts_corr", "ts_cov", "ts_zscore", "ts_rank",
-    "ts_mean", "ts_std", "ts_sum", "ts_max", "ts_min",
+    "ts_mean", "ts_std", "ts_sum", "ts_max", "ts_min", "ts_median",
+    "ts_quantile", "ts_skew", "ts_kurt", "ts_ema", "ts_argmax", "ts_argmin",
+    "ts_pct_change", "ts_minmax_norm",
     "lag", "delta", "cs_rank", "cs_zscore", "cs_demean",
-    "safe_div", "signed_power", "abs", "sign", "neg", "log", "sqrt",
+    "cs_scale", "cs_winsorize", "cs_quantile", "cs_neutralize",
+    "safe_div", "signed_power", "abs", "sign", "neg", "log", "signed_log",
+    "sqrt", "clip", "clamp", "min_of", "max_of", "sigmoid", "tanh",
+    "ifelse", "gt", "ge", "lt", "le", "eq", "and_op", "or_op", "not_op",
+    "mean_of", "weighted_sum", "combine_rank",
 ]
 
 
@@ -124,7 +131,7 @@ def _save(kb: Dict[str, Any]) -> None:
 
 
 def _copy_submit_artifact(run_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy passing factor parquet into autoalpha/submit and return metadata fields."""
+    """Copy passing factor parquet into autoalpha_v2/submit and return metadata fields."""
     if not entry.get("PassGates"):
         return {}
 
@@ -160,6 +167,13 @@ def _copy_submit_artifact(run_id: str, entry: Dict[str, Any]) -> Dict[str, Any]:
         "submit_metadata_path": str(meta_path),
         "submit_copied_at": meta["copied_at"],
     }
+
+
+def _factor_card_path(research_path: Any) -> str:
+    if not research_path:
+        return ""
+    path = Path(str(research_path)) / "factor_card.json"
+    return str(path) if path.is_file() else ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,6 +277,7 @@ def add_factor(
         "parquet_path": result.get("parquet_path", ""),
         "eval_days": int(result.get("eval_days", 0) or 0),
         "research_path": result.get("research_path", ""),
+        "factor_card_path": _factor_card_path(result.get("research_path", "")),
         "fingerprint": formula_structural_fingerprint(result.get("formula", "")),
     }
 
@@ -278,7 +293,7 @@ def add_factor(
 
 
 def sync_submit_artifacts() -> Dict[str, Any]:
-    """Backfill autoalpha/submit with all currently passing parquet factors."""
+    """Backfill autoalpha_v2/submit with all currently passing parquet factors."""
     kb = _load()
     factors = kb.setdefault("factors", {})
     copied = 0

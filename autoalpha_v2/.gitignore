@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.db
+*.log
+
+knowledge.json
+knowledge_backup_*.json
+
+output/
+research/
+submit/
+submit_repaired/
+recompute_reports/
+model_lab/
+process_logs/
+inspirations/

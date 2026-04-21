@@ -1,14 +1,14 @@
 """
-autoalpha/loop.py
+autoalpha_v1/loop.py
 
 Multi-round iterative factor mining loop.
 Inspired by karpathy/autoresearch's ratchet pattern:
   - Each round, top passing factors feed the next LLM call as "parents"
   - All results (pass or fail) are persisted in knowledge_base.py
-  - Loop logs to autoalpha/loop.log for frontend streaming
+  - Loop logs to autoalpha_v1/loop.log for frontend streaming
 
 Usage:
-    python autoalpha/loop.py --rounds 5 --ideas 3 --days 0
+    python autoalpha_v1/loop.py --rounds 5 --ideas 3 --days 0
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from autoalpha import knowledge_base as kb
-from autoalpha.error_utils import AutoAlphaRuntimeError, humanize_error
-from autoalpha.pipeline import run
-from autoalpha.idea_cache import get_default_cache
-from autoalpha.inspiration_fetcher import start_background_fetcher
+from autoalpha_v1 import knowledge_base as kb
+from autoalpha_v1.error_utils import AutoAlphaRuntimeError, humanize_error
+from autoalpha_v1.pipeline import run
+from autoalpha_v1.idea_cache import get_default_cache
+from autoalpha_v1.inspiration_fetcher import start_background_fetcher
 from core.feishu_bot import FeishuNotifier
 from runtime_config import load_runtime_config
 
@@ -223,7 +223,7 @@ def mining_loop(
 
     if run_model_lab_on_finish:
         try:
-            from autoalpha.rolling_model_lab import run_model_lab
+            from autoalpha_v1.rolling_model_lab import run_model_lab
 
             full_valid_count = len(kb.list_valid_factors(min_eval_days=min_full_eval_days))
             target_for_lab = max(1, min(target_valid_count or full_valid_count or 1, full_valid_count or 1))

@@ -8,7 +8,7 @@ This script is intentionally conservative:
   - every candidate is recomputed from formula on the full DataHub history;
   - metrics are recalculated by core.evaluator.evaluate_submission_like_wide;
   - output/<run_id>.pq is regenerated with the normalized full-grid exporter;
-  - autoalpha/submit is rebuilt with only factors that still pass the corrected gates.
+  - autoalpha_v2/submit is rebuilt with only factors that still pass the corrected gates.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from autoalpha import factor_research
-from autoalpha.pipeline import AUTOALPHA_OUT, compute_alpha, evaluate_alpha, export_parquet
+from autoalpha_v2 import factor_research
+from autoalpha_v2.pipeline import AUTOALPHA_OUT, compute_alpha, evaluate_alpha, export_parquet
 from prepare_data import DataHub
 
 AUTOALPHA_DIR = Path(__file__).resolve().parent
@@ -177,6 +177,7 @@ def recompute(previous_only: bool = True, write_research: bool = True) -> dict[s
                     metrics=metrics,
                     hub=hub,
                     eval_days=days,
+                    thought_process=entry.get("thought_process", ""),
                 )
 
             snapshot = _metric_snapshot(metrics)
@@ -202,6 +203,7 @@ def recompute(previous_only: bool = True, write_research: bool = True) -> dict[s
                 "eval_days": len(days),
                 "parquet_path": str(out_path),
                 "research_path": research_path,
+                "factor_card_path": str(Path(research_path) / "factor_card.json") if research_path and (Path(research_path) / "factor_card.json").is_file() else "",
                 "recomputed_at": datetime.now().isoformat(),
             }
             for key in ("submit_path", "submit_metadata_path", "submit_copied_at"):

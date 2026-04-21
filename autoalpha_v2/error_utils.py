@@ -1,5 +1,5 @@
 """
-autoalpha/error_utils.py
+autoalpha_v2/error_utils.py
 
 Shared helpers for turning raw runtime exceptions into short, human-readable
 messages for logs, API responses, and Feishu notifications.

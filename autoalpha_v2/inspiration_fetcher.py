@@ -1,5 +1,5 @@
 """
-autoalpha/inspiration_fetcher.py
+autoalpha_v2/inspiration_fetcher.py
 
 Multi-source inspiration fetcher.  Supported sources:
   - arxiv   : query the public ArXiv API for quant-finance papers
@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from autoalpha.inspiration_db import (
+from autoalpha_v2.inspiration_db import (
     AUTOALPHA_DIR,
     _heuristic_summary,
     _trim_text,
@@ -154,7 +154,7 @@ def fetch_arxiv(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
 
 def fetch_url_inspiration(url: str) -> Optional[Dict[str, Any]]:
     """Fetch a single URL and convert to an inspiration record."""
-    from autoalpha.inspiration_db import _fetch_url_content, _build_source_hash, PROMPT_DIR
+    from autoalpha_v2.inspiration_db import _fetch_url_content, _build_source_hash, PROMPT_DIR
     try:
         title, content = _fetch_url_content(url)
         if not content or content == url:
@@ -187,7 +187,7 @@ def generate_llm_inspirations(n: int = 6) -> List[Dict[str, Any]]:
     """Ask the cheap model to brainstorm n alpha ideas; return inspiration records."""
     import json as _json
     try:
-        from autoalpha.llm_client import _call_cheap_model
+        from autoalpha_v2.llm_client import _call_cheap_model
     except ImportError:
         return []
 

@@ -1,5 +1,5 @@
 """
-autoalpha/idea_cache.py
+autoalpha_v1/idea_cache.py
 
 SQLite-backed pre-generation cache for LLM-created alpha ideas.
 
@@ -11,7 +11,7 @@ Why this exists:
   A configurable concurrency limit (default 3) prevents hammering the API.
 
 Usage:
-    from autoalpha.idea_cache import IdeaCache
+    from autoalpha_v1.idea_cache import IdeaCache
     cache = IdeaCache()
     cache.start_fill(n=10, parents=parents, guidance=guidance)
     idea = cache.pop()   # None if cache is still empty
@@ -206,7 +206,7 @@ class IdeaCache:
         def _fill_worker():
             print(f"[idea_cache] Filling {actual_n} ideas (concurrency={self.concurrency})…")
             try:
-                from autoalpha.llm_client import generate_idea
+                from autoalpha_v1.llm_client import generate_idea
             except ImportError:
                 print("[idea_cache] Cannot import generate_idea")
                 return
@@ -249,7 +249,7 @@ class IdeaCache:
         Synchronous fill (blocks until done).  Used in tests / manual calls.
         Returns number of ideas added.
         """
-        from autoalpha.llm_client import generate_idea
+        from autoalpha_v1.llm_client import generate_idea
 
         added = 0
 

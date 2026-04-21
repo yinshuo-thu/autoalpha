@@ -1,5 +1,5 @@
 """
-autoalpha/rolling_model_lab.py
+autoalpha_v2/rolling_model_lab.py
 
 Dedicated long-running experiment for:
 1. Mining until we have N valid AutoAlpha factors
@@ -33,9 +33,9 @@ MODEL_LAB_ROOT = Path(__file__).resolve().parent / "model_lab"
 FEATURE_CACHE_DIR = MODEL_LAB_ROOT / "feature_cache_daily"
 ENSEMBLE_OUTPUT_DIR = MODEL_LAB_ROOT / "ensemble_factors"
 
-from autoalpha import knowledge_base as kb
-from autoalpha.error_utils import humanize_error
-from autoalpha.pipeline import run as run_pipeline
+from autoalpha_v2 import knowledge_base as kb
+from autoalpha_v2.error_utils import humanize_error
+from autoalpha_v2.pipeline import run as run_pipeline
 from prepare_data import DataHub
 
 

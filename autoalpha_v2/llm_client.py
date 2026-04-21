@@ -1,5 +1,5 @@
 """
-autoalpha/llm_client.py
+autoalpha_v2/llm_client.py
 
 LLM client for AutoAlpha factor generation.
 
@@ -29,9 +29,9 @@ from typing import Any, Dict, Iterable, List
 
 import requests
 
-from autoalpha.error_utils import AutoAlphaRuntimeError, as_runtime_error
-from autoalpha.inspiration_db import compose_inspiration_context
-from autoalpha.knowledge_base import get_generation_guidance
+from autoalpha_v2.error_utils import AutoAlphaRuntimeError, as_runtime_error
+from autoalpha_v2.inspiration_db import compose_inspiration_context
+from autoalpha_v2.knowledge_base import get_generation_guidance
 from runtime_config import get_llm_routing, openai_chat_completions_url, load_runtime_config
 
 warnings.filterwarnings("ignore")
@@ -48,11 +48,19 @@ Generate ONE original 15-minute alpha factor in JSON only.
 
 # EXACT DSL (these names only)
 Fields   : open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap
-Time-series: lag(x,d), delta(x,d), ts_mean(x,d), ts_std(x,d), ts_sum(x,d),
-             ts_max(x,d), ts_min(x,d), ts_zscore(x,d), ts_rank(x,d), ts_decay_linear(x,d),
-             ts_corr(x,y,d), ts_cov(x,y,d)
-Cross-section: cs_rank(x), cs_zscore(x), cs_demean(x)
-Math       : safe_div(a,b), signed_power(a,b), abs(x), sign(x), neg(x), log(x), sqrt(x)
+Time-series: lag(x,d), delta(x,d), ts_pct_change(x,d), ts_mean(x,d), ts_ema(x,d),
+             ts_std(x,d), ts_sum(x,d), ts_max(x,d), ts_min(x,d), ts_median(x,d),
+             ts_quantile(x,d,q), ts_zscore(x,d), ts_rank(x,d), ts_minmax_norm(x,d),
+             ts_decay_linear(x,d), ts_corr(x,y,d), ts_cov(x,y,d),
+             ts_skew(x,d), ts_kurt(x,d), ts_argmax(x,d), ts_argmin(x,d)
+Cross-section: cs_rank(x), cs_zscore(x), cs_demean(x), cs_scale(x),
+               cs_winsorize(x,p), cs_quantile(x,q), cs_neutralize(x,y)
+Math       : safe_div(a,b), signed_power(a,b), abs(x), sign(x), neg(x),
+             log(x), signed_log(x), sqrt(x), clip(x,a,b), min_of(x,y), max_of(x,y),
+             sigmoid(x), tanh(x), mean_of(x1,x2,...), weighted_sum(w1,x1,w2,x2,...),
+             combine_rank(x1,x2,...)
+Condition  : ifelse(cond,a,b), gt(x,y), ge(x,y), lt(x,y), le(x,y), eq(x,y),
+             and_op(a,b), or_op(a,b), not_op(a)
 Infix      : +, -, *, /
 
 # HARD CONSTRAINTS
@@ -62,6 +70,7 @@ Infix      : +, -, *, /
 - safe_div(a, b) must always have a SERIES denominator b; never pass a scalar literal as b.
 - If you need to divide by a scalar constant, use infix / instead of safe_div.
 - Keep the final formula compact: ideally <= 4 functional layers and <= 2 multiplicative blocks.
+- Prefer smooth operators over hard conditions unless the condition encodes a clear regime filter.
 
 # RESEARCH GOAL
 - Prefer signals that can realistically pass competition gates on full-history 2022-2024 evaluation.
@@ -70,6 +79,8 @@ Infix      : +, -, *, /
   compression / release, or short-horizon reversal after exhaustion.
 - Prefer a structure like signal core + stabilizer + cross-sectional normalization.
 - Keep turnover controllable: use ts_decay_linear or ts_mean as outer smoothers when needed.
+- New useful patterns: robust baselines via ts_median/ts_quantile, soft clipping via tanh/sigmoid,
+  liquidity-neutral residuals via cs_neutralize, and multi-leg blends via mean_of/combine_rank.
 - Aim for diversity versus prior factors. Do not paraphrase existing formulas.
 - Favor full coverage, low concentration, and stable cross-sectional behavior.
 

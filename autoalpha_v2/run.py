@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-autoalpha/run.py — Entry point
+autoalpha_v2/run.py — Entry point
 
 Usage:
-    python autoalpha/run.py               # 3 ideas, full trading history
-    python autoalpha/run.py --n 5         # 5 ideas
-    python autoalpha/run.py --days 120    # use last 120 trading days
+    python autoalpha_v2/run.py               # 3 ideas, full trading history
+    python autoalpha_v2/run.py --n 5         # 5 ideas
+    python autoalpha_v2/run.py --days 120    # use last 120 trading days
 """
 
 import argparse
@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from autoalpha.pipeline import run
+from autoalpha_v2.pipeline import run
 
 
 def main():

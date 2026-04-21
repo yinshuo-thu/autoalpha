@@ -1,10 +1,10 @@
 """
-autoalpha/factor_research.py
+autoalpha_v1/factor_research.py
 
 Automated factor research analysis script.
 Called after each factor is evaluated in pipeline.py.
 
-Outputs per factor (in autoalpha/research/<run_id>/):
+Outputs per factor (in autoalpha_v1/research/<run_id>/):
   - report.json  : IC, decay, alpha distribution stats
   - report.md    : Human-readable markdown summary
   - analysis.png : 4-panel chart (IC decay, distribution, metrics, formula)
@@ -540,7 +540,7 @@ def _compute_redundancy(formula: str) -> Dict[str, Any]:
     tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", formula or ""))
     best = {"run_id": "", "similarity": 0.0}
     try:
-        from autoalpha import knowledge_base as kb
+        from autoalpha_v1 import knowledge_base as kb
 
         for item in kb.get_all_factors():
             other_formula = item.get("formula", "")

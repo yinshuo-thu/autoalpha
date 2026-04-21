@@ -1,5 +1,5 @@
 """
-autoalpha/pipeline.py
+autoalpha_v1/pipeline.py
 
 End-to-end pipeline:
   1. LLM generates formula idea (Claude via third-party relay)
@@ -34,10 +34,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from autoalpha import factor_research
-from autoalpha import knowledge_base as kb
-from autoalpha.error_utils import AutoAlphaRuntimeError, humanize_error
-from autoalpha.llm_client import generate_idea
+from autoalpha_v1 import factor_research
+from autoalpha_v1 import knowledge_base as kb
+from autoalpha_v1.error_utils import AutoAlphaRuntimeError, humanize_error
+from autoalpha_v1.llm_client import generate_idea
 from core.evaluator import evaluate_submission_like_wide
 from core.feishu_bot import FeishuNotifier
 from formula_validator import validate_formula
@@ -50,35 +50,75 @@ _feishu = FeishuNotifier(
     webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/b4cd233b-5185-4135-8a08-4ffda6305877"
 )
 
-AUTOALPHA_OUT = PROJECT_ROOT / "autoalpha" / "output"
-AUTOALPHA_TRACE_DIR = PROJECT_ROOT / "autoalpha" / "process_logs"
+AUTOALPHA_OUT = PROJECT_ROOT / "autoalpha_v1" / "output"
+AUTOALPHA_TRACE_DIR = PROJECT_ROOT / "autoalpha_v1" / "process_logs"
 
 # Extended operator registry: superset of core/formula_engine.py OPS_REGISTRY
 # Adds neg, clip, ts_corr, ts_cov, and infix aliases that the LLM may emit.
 _EXT_OPS = {
     "lag":           _ops.lag,
+    "delay":         _ops.lag,
     "delta":         _ops.delta,
     "ts_mean":       _ops.ts_mean,
     "ts_std":        _ops.ts_std,
     "ts_sum":        _ops.ts_sum,
     "ts_max":        _ops.ts_max,
     "ts_min":        _ops.ts_min,
+    "ts_median":     _ops.ts_median,
+    "ts_quantile":   _ops.ts_quantile,
+    "ts_skew":       _ops.ts_skew,
+    "ts_kurt":       _ops.ts_kurt,
+    "ts_ema":        _ops.ts_ema,
+    "ts_argmax":     _ops.ts_argmax,
+    "ts_argmin":     _ops.ts_argmin,
+    "ts_pct_change": _ops.ts_pct_change,
+    "ts_minmax_norm": _ops.ts_minmax_norm,
     "ts_zscore":     _ops.ts_zscore,
     "ts_rank":       _ops.ts_rank,
     "ts_decay_linear": _ops.ts_decay_linear,
+    "decay_linear":  _ops.ts_decay_linear,
     "ts_corr":       _ops.ts_corr,
     "ts_cov":        _ops.ts_cov,
     "cs_rank":       _ops.cs_rank,
+    "rank":          _ops.cs_rank,
     "cs_demean":     _ops.cs_demean,
+    "demean":        _ops.cs_demean,
     "cs_zscore":     _ops.cs_zscore,
+    "zscore":        _ops.cs_zscore,
+    "cs_scale":      _ops.cs_scale,
+    "scale":         _ops.cs_scale,
+    "cs_winsorize":  _ops.cs_winsorize,
+    "winsorize":     _ops.cs_winsorize,
+    "cs_quantile":   _ops.cs_quantile,
+    "cs_neutralize": _ops.cs_neutralize,
     "safe_div":      _ops.safe_div,
+    "div":           _ops.safe_div,
     "signed_power":  _ops.signed_power,
+    "pow":           _ops.signed_power,
     "abs":           np.abs,
     "sign":          np.sign,
-    "log":           np.log,
-    "sqrt":          np.sqrt,
+    "log":           _ops.safe_log,
+    "signed_log":    _ops.signed_log,
+    "sqrt":          _ops.safe_sqrt,
+    "sigmoid":       _ops.sigmoid,
+    "tanh":          np.tanh,
     "neg":           lambda x: -x,
-    "clip":          lambda x, a, b: x.clip(a, b),
+    "clip":          _ops.clamp,
+    "clamp":         _ops.clamp,
+    "min_of":        _ops.min_of,
+    "max_of":        _ops.max_of,
+    "ifelse":        _ops.ifelse,
+    "gt":            _ops.gt,
+    "ge":            _ops.ge,
+    "lt":            _ops.lt,
+    "le":            _ops.le,
+    "eq":            _ops.eq,
+    "and_op":        _ops.and_op,
+    "or_op":         _ops.or_op,
+    "not_op":        _ops.not_op,
+    "mean_of":       _ops.mean_of,
+    "weighted_sum":  _ops.weighted_sum,
+    "combine_rank":  _ops.combine_rank,
     "np":            np,
 }
 
@@ -417,7 +457,7 @@ def run(
 
     # ── 2. Generate ideas (parallel with concurrency limit + cache pop) ────────
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-    from autoalpha.idea_cache import get_default_cache
+    from autoalpha_v1.idea_cache import get_default_cache
 
     idea_cache = get_default_cache()
     idea_concurrency = _cfg_int(cfg, "AUTOALPHA_IDEA_CONCURRENCY", 3)
@@ -705,6 +745,7 @@ def run(
                     metrics=metrics,
                     hub=hub,
                     eval_days=eval_days,
+                    thought_process=idea.get("thought_process", ""),
                 )
             except Exception as e:
                 print(f"  [WARN] Research analysis error: {e}")
@@ -761,7 +802,7 @@ def run(
         if metrics.get("PassGates"):
             try:
                 # Compute ranking among all known factors
-                from autoalpha import knowledge_base as _kb
+                from autoalpha_v1 import knowledge_base as _kb
                 all_known = _kb.get_all_factors()
                 all_scores = sorted(
                     [f.get("Score", 0) for f in all_known if f.get("Score", 0) > 0],
@@ -791,7 +832,6 @@ def run(
                     },
                     formula=formula,
                     timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    valid_count=len([r for r in results if r.get("PassGates")]),
                 )
                 print(f"  [feishu] ✅ Notification sent for {run_id}")
             except Exception as e:
