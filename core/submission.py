@@ -35,6 +35,35 @@ class SubmissionBuilder:
         return "alpha" if "alpha" in alpha_df.columns else alpha_df.columns[0]
 
     @staticmethod
+    def _normalize_submission_index(alpha_df):
+        """Normalize MultiIndex keys to the submission grid convention."""
+        alpha_df = SubmissionBuilder._ensure_frame(alpha_df)
+        if alpha_df.empty:
+            return alpha_df
+        if not isinstance(alpha_df.index, pd.MultiIndex):
+            raise ValueError("Submission alpha must use MultiIndex(date, datetime, security_id)")
+
+        index_names = list(alpha_df.index.names)
+        required_index = ["date", "datetime", "security_id"]
+        for name in required_index:
+            if name not in index_names:
+                raise ValueError(f"Missing required index level: {name}")
+
+        if index_names != required_index:
+            alpha_df = alpha_df.reorder_levels(required_index)
+
+        date_vals = pd.to_datetime(alpha_df.index.get_level_values("date")).normalize()
+        datetime_vals = pd.to_datetime(alpha_df.index.get_level_values("datetime"), utc=True).tz_localize(None)
+        security_vals = pd.Index(alpha_df.index.get_level_values("security_id")).astype("int64")
+
+        normalized = alpha_df.copy()
+        normalized.index = pd.MultiIndex.from_arrays(
+            [date_vals, datetime_vals, security_vals],
+            names=required_index,
+        )
+        return normalized.sort_index()
+
+    @staticmethod
     def pre_submit_sanity_check(alpha_df, start_date, end_date):
         alpha_df = SubmissionBuilder._ensure_frame(alpha_df)
         if alpha_df.empty:
@@ -46,14 +75,7 @@ class SubmissionBuilder:
                 "row_count": 0,
             }
 
-        if not isinstance(alpha_df.index, pd.MultiIndex):
-            raise ValueError("Submission alpha must use MultiIndex(date, datetime, security_id)")
-
-        index_names = list(alpha_df.index.names)
-        required_index = ["date", "datetime", "security_id"]
-        for name in required_index:
-            if name not in index_names:
-                raise ValueError(f"Missing required index level: {name}")
+        alpha_df = SubmissionBuilder._normalize_submission_index(alpha_df)
 
         alpha_col = SubmissionBuilder._alpha_col(alpha_df)
         alpha_values = alpha_df[alpha_col]
@@ -144,7 +166,7 @@ class SubmissionBuilder:
             return alpha_df
 
         alpha_col = SubmissionBuilder._alpha_col(alpha_df)
-        alpha_frame = alpha_df[[alpha_col]].sort_index()
+        alpha_frame = SubmissionBuilder._normalize_submission_index(alpha_df[[alpha_col]])
 
         from core.datahub import get_trading_days, load_universe
 
@@ -207,7 +229,7 @@ class SubmissionBuilder:
         """
         Exports alpha prediction dataframe to parquet.
         """
-        df_export = SubmissionBuilder._ensure_frame(alpha_df)
+        df_export = SubmissionBuilder._normalize_submission_index(alpha_df)
             
         df_export = df_export.reset_index()
         req_cols = ['date', 'datetime', 'security_id']
@@ -223,10 +245,7 @@ class SubmissionBuilder:
                 df_export = df_export.rename(columns={avail[0]: 'alpha'})
 
         df_export["date"] = pd.to_datetime(df_export["date"]).dt.strftime("%Y-%m-%d")
-        if pd.api.types.is_datetime64_any_dtype(df_export["datetime"]):
-            df_export["datetime"] = df_export["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            df_export["datetime"] = pd.to_datetime(df_export["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+        df_export["datetime"] = pd.to_datetime(df_export["datetime"], utc=True).dt.tz_localize(None).dt.strftime("%Y-%m-%d %H:%M:%S")
         df_export["security_id"] = df_export["security_id"].astype(int)
         df_export["alpha"] = pd.to_numeric(df_export["alpha"], errors="coerce").clip(-1.0, 1.0)
         df_export = df_export[['date', 'datetime', 'security_id', 'alpha']]

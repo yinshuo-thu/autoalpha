@@ -1,0 +1,110 @@
+{
+  "recomputed_at": "2026-04-21T23:19:00.684808",
+  "status": "done",
+  "candidate_count": 10,
+  "passing_count": 1,
+  "knowledge_backup": "/Volumes/T7/Scientech/autoalpha/knowledge_backup_before_recompute_20260421_224342.json",
+  "submit_backup": "/Volumes/T7/Scientech/autoalpha/submit/_backup_before_recompute_20260421_224342",
+  "rows": [
+    {
+      "run_id": "autoalpha_20260421_131115_03",
+      "PassGates": true,
+      "IC": 0.6111517396339039,
+      "IR": 3.077610752756015,
+      "tvr": 321.6978759765625,
+      "Score": 78.99716160536676,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_131115_03.pq",
+      "submit_path": "/Volumes/T7/Scientech/autoalpha/submit/autoalpha_20260421_131115_03.pq"
+    },
+    {
+      "run_id": "autoalpha_20260421_142401_05",
+      "PassGates": false,
+      "IC": 0.657324202786335,
+      "IR": 4.3183288903170105,
+      "tvr": 545.1719970703125,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_142401_05.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_175028_03",
+      "PassGates": false,
+      "IC": 0.6503047065955034,
+      "IR": 3.9507021967783063,
+      "tvr": 604.6016845703125,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_175028_03.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_181727_01",
+      "PassGates": false,
+      "IC": 0.6804442421442436,
+      "IR": 3.988026423608909,
+      "tvr": 559.6467895507812,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_181727_01.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_185732_02",
+      "PassGates": false,
+      "IC": 0.6638007354790185,
+      "IR": 4.010903338584238,
+      "tvr": 568.13232421875,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_185732_02.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_200455_01",
+      "PassGates": false,
+      "IC": 0.6867618147760466,
+      "IR": 3.8204006827987,
+      "tvr": 467.21124267578125,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_200455_01.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_200455_03",
+      "PassGates": false,
+      "IC": 0.6920490070932679,
+      "IR": 4.565091290920407,
+      "tvr": 674.1449584960938,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_200455_03.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_203928_02",
+      "PassGates": false,
+      "IC": 0.7180885063319552,
+      "IR": 3.5795802030927564,
+      "tvr": 439.3148498535156,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_203928_02.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_205010_03",
+      "PassGates": false,
+      "IC": 0.6341440515336332,
+      "IR": 3.9854462642134307,
+      "tvr": 626.8639526367188,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_205010_03.pq",
+      "submit_path": ""
+    },
+    {
+      "run_id": "autoalpha_20260421_211532_03",
+      "PassGates": false,
+      "IC": 0.6400833162734565,
+      "IR": 3.896514748460335,
+      "tvr": 584.5106811523438,
+      "Score": 0.0,
+      "parquet_path": "/Volumes/T7/Scientech/autoalpha/output/autoalpha_20260421_211532_03.pq",
+      "submit_path": ""
+    }
+  ]
+}

@@ -8,6 +8,14 @@ cache/
 outputs/*.pq
 research_runs/*.json
 submit/**/*.pq
+autoalpha/output/**/*.pq
+autoalpha/output/*.pq
+autoalpha/submit/**/*.pq
+autoalpha/submit/*.pq
+autoalpha/submit_repaired/**/*.pq
+autoalpha/submit_repaired/*.pq
+autoalpha/process_logs/
+autoalpha/autoalpha_lab.db
 
 # Environments
 .conda/
