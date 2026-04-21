@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { FileStack, GitBranch } from 'lucide-react';
+import { BarChart2, FileStack, GitBranch } from 'lucide-react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/HoverCard';
 
 interface KbFactor {
@@ -20,6 +31,7 @@ interface KbFactor {
   gates_detail?: Record<string, boolean>;
   parquet_path?: string;
   research_path?: string;
+  factor_card_path?: string;
   parent_run_ids?: string[];
   live_submitted?: boolean;
   live_test_result?: LiveTestResult;
@@ -64,6 +76,31 @@ interface ResearchReport {
   formula: string;
   metrics: Record<string, number | boolean>;
   alpha_stats: Record<string, number>;
+  factor_card?: FactorCard;
+  factor_card_path?: string;
+  created_at: string;
+}
+
+interface FactorCard {
+  run_id: string;
+  title: string;
+  status: string;
+  theme: string;
+  thesis: string;
+  metrics: Record<string, number>;
+  definition?: Record<string, any>;
+  distribution?: Record<string, any>;
+  histogram?: Array<Record<string, any>>;
+  temporal?: Record<string, Array<Record<string, any>>>;
+  prediction?: Record<string, any>;
+  layering?: Record<string, any>;
+  regime?: Array<Record<string, any>>;
+  stability?: Record<string, any>;
+  redundancy?: Record<string, any>;
+  gate_notes: string[];
+  diagnostics: Record<string, number | string>;
+  risk_notes: string[];
+  formula: string;
   created_at: string;
 }
 
@@ -79,6 +116,12 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
 
 function formatNumber(value: number, digits = 2) {
   return Number.isFinite(value) ? value.toFixed(digits) : '--';
+}
+
+function formatMetric(value: any, digits = 4) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return value === undefined || value === null || value === '' ? '--' : String(value);
+  return num.toFixed(digits);
 }
 
 function formatDateTime(value?: string) {
@@ -102,6 +145,10 @@ function formatFileSize(size: number) {
 function truncate(text: string, length: number) {
   if (!text) return '—';
   return text.length > length ? `${text.slice(0, length)}...` : text;
+}
+
+function isSubmitReady(factor: KbFactor) {
+  return Boolean(factor.PassGates && factor.factor_card_path);
 }
 
 function liveResultMetrics(result?: LiveTestResult) {
@@ -167,6 +214,9 @@ function factorRowBackground(factor: KbFactor, maxScore: number) {
   return `rgba(16, 185, 129, ${alpha})`;
 }
 
+const actionButtonClass = "inline-flex h-9 min-w-[4.75rem] items-center justify-center rounded-full border border-border/60 px-3 text-xs font-medium text-foreground transition-colors hover:bg-white";
+const submittedButtonClass = "inline-flex h-9 min-w-[4.75rem] items-center justify-center rounded-full bg-emerald-100 px-3 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-200";
+
 const Panel = ({
   title,
   subtitle,
@@ -183,6 +233,67 @@ const Panel = ({
     </div>
     {children}
   </section>
+);
+
+const SmallChart = ({
+  data,
+  type = 'line',
+  color = '#0f766e',
+  height = 150,
+}: {
+  data?: Array<Record<string, any>>;
+  type?: 'line' | 'bar';
+  color?: string;
+  height?: number;
+}) => {
+  const chartData = (data || []).slice(-80);
+  if (!chartData.length) {
+    return <div className="flex h-[150px] items-center justify-center rounded-2xl bg-slate-50 text-xs text-muted-foreground">暂无序列</div>;
+  }
+  return (
+    <div style={{ height }} className="rounded-2xl bg-white/80 p-2">
+      <ResponsiveContainer width="100%" height="100%">
+        {type === 'bar' ? (
+          <BarChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+            <XAxis dataKey="x" tick={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 10 }} width={38} />
+            <Tooltip formatter={(value: any) => formatMetric(value)} labelFormatter={(label) => String(label)} />
+            <Bar dataKey="value" fill={color} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        ) : (
+          <LineChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+            <XAxis dataKey="x" tick={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 10 }} width={38} />
+            <Tooltip formatter={(value: any) => formatMetric(value)} labelFormatter={(label) => String(label)} />
+            <Line type="monotone" dataKey="value" stroke={color} strokeWidth={2} dot={false} />
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+const StatGrid = ({ items }: { items: Array<[string, any]> }) => (
+  <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+    {items.map(([label, value]) => (
+      <div key={label} className="rounded-2xl bg-white/85 p-3">
+        <div className="text-[11px] text-muted-foreground">{label}</div>
+        <div className="mt-1 font-mono text-sm font-semibold text-foreground">{formatMetric(value)}</div>
+      </div>
+    ))}
+  </div>
+);
+
+const CardSection = ({ title, children }: { title: string; children: React.ReactNode }) => (
+  <div className="rounded-3xl border border-border/50 bg-slate-50/80 p-4">
+    <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
+      <BarChart2 className="h-4 w-4 text-emerald-600" />
+      {title}
+    </div>
+    {children}
+  </div>
 );
 
 const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void }) => {
@@ -203,6 +314,10 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
     };
   }, [runId]);
 
+  const card = report?.factor_card;
+  const cardMetrics = card?.metrics || {};
+  const diagnostics = card?.diagnostics || {};
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" onClick={onClose}>
       <div className="max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-border/50 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
@@ -219,6 +334,115 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
         {!report && !error ? <div className="text-sm text-muted-foreground">LOG 加载中...</div> : null}
         {report ? (
           <div className="space-y-4">
+            {card && card.status === 'PASS' ? (
+              <div className="space-y-4 rounded-3xl border border-emerald-200 bg-emerald-50/60 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-[11px] uppercase tracking-[0.22em] text-emerald-700">Factor Card</div>
+                    <div className="mt-2 break-all text-lg font-semibold text-slate-950">{card.title || card.run_id}</div>
+                    <div className="mt-1 text-sm text-emerald-800">{card.theme}</div>
+                  </div>
+                  <div className={`rounded-full px-3 py-1 text-xs font-semibold ${card.status === 'PASS' ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                    {card.status}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {['IC', 'IR', 'tvr', 'Score'].map((key) => (
+                    <div key={key} className="rounded-2xl bg-white/90 p-3">
+                      <div className="text-[11px] text-muted-foreground">{key}</div>
+                      <div className="mt-2 font-mono text-lg font-semibold text-foreground">{formatMetric(cardMetrics[key])}</div>
+                    </div>
+                  ))}
+                </div>
+                <CardSection title="1. 因子定义">
+                  <div className="space-y-3 text-sm leading-6 text-slate-700">
+                    <pre className="whitespace-pre-wrap break-all rounded-2xl bg-white/90 p-3 font-mono text-xs">{card.definition?.formula || card.formula}</pre>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div>输入字段：{(card.definition?.inputs || []).join(', ') || '--'}</div>
+                      <div>更新频率：{card.definition?.update_frequency || '15-minute'}</div>
+                      <div>预测周期：{card.definition?.prediction_horizon || '--'}</div>
+                      <div>适用标的：{card.definition?.universe || '--'}</div>
+                    </div>
+                    <div>{card.thesis}</div>
+                  </div>
+                </CardSection>
+                <CardSection title="2. 历史分布">
+                  <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
+                    <SmallChart data={(card.histogram || []).map((row) => ({ x: row.bin, value: row.value }))} type="bar" color="#7c3aed" />
+                    <StatGrid items={[
+                      ['P1', card.distribution?.p1], ['P5', card.distribution?.p5], ['P50', card.distribution?.p50], ['P95', card.distribution?.p95],
+                      ['P99', card.distribution?.p99], ['Mean', card.distribution?.mean], ['Std', card.distribution?.std], ['Skew', card.distribution?.skew],
+                      ['Kurt', card.distribution?.kurt], ['Missing', card.distribution?.missing_rate], ['Extreme', card.distribution?.extreme_share], ['InBounds', diagnostics.pct_in_bounds],
+                    ]} />
+                  </div>
+                </CardSection>
+                <CardSection title="3. 时序演变">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <SmallChart data={card.temporal?.daily_mean} color="#0f766e" />
+                    <SmallChart data={card.temporal?.daily_std} color="#2563eb" />
+                    <SmallChart data={card.temporal?.coverage} color="#f97316" />
+                  </div>
+                </CardSection>
+                <CardSection title="4. 预测力">
+                  <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
+                    <StatGrid items={[
+                      ['IC Mean', card.prediction?.ic_mean ?? cardMetrics.IC], ['ICIR', card.prediction?.icir ?? cardMetrics.IR],
+                      ['Rank IC', card.prediction?.rank_ic], ['Half Life', diagnostics.ic_half_life],
+                    ]} />
+                    <SmallChart data={card.prediction?.rolling_ic} color="#0f766e" />
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                    {(card.prediction?.horizon_ic || []).map((row: any) => (
+                      <div key={row.horizon} className="rounded-2xl bg-white/85 p-3 text-xs">
+                        <div className="text-muted-foreground">{row.horizon}</div>
+                        <div className="mt-1 font-mono font-semibold">{formatMetric(row.ic)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </CardSection>
+                <CardSection title="5. 表现分层图">
+                  <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
+                    <SmallChart data={(card.layering?.decile_returns_bps || []).map((row: any) => ({ x: `Q${row.bucket}`, value: row.value }))} type="bar" color="#0ea5e9" />
+                    <div>
+                      <StatGrid items={[['Top-Bottom bps', card.layering?.top_minus_bottom_bps], ['Score', cardMetrics.Score], ['TVR', cardMetrics.tvr], ['Days', cardMetrics.nd]]} />
+                      <div className="mt-3"><SmallChart data={card.layering?.cumulative_top_minus_bottom} color="#16a34a" height={120} /></div>
+                    </div>
+                  </div>
+                </CardSection>
+                <CardSection title="6. 什么时候表现好">
+                  <div className="grid gap-2 md:grid-cols-3">
+                    {(card.regime || []).map((row) => (
+                      <div key={String(row.regime)} className="rounded-2xl bg-white/85 p-3">
+                        <div className="text-xs text-muted-foreground">{String(row.regime)}</div>
+                        <div className="mt-1 font-mono text-sm font-semibold">IC {formatMetric(row.ic)}</div>
+                        <div className="text-[11px] text-muted-foreground">{row.days} days</div>
+                      </div>
+                    ))}
+                  </div>
+                </CardSection>
+                <CardSection title="7. 稳定性">
+                  <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
+                    <SmallChart data={card.stability?.monthly_ic} color="#9333ea" />
+                    <StatGrid items={[
+                      ...(card.stability?.splits || []).map((row: any) => [row.split, row.ic] as [string, any]),
+                      ['Clipped IC', card.stability?.clipped_ic],
+                    ]} />
+                  </div>
+                </CardSection>
+                <CardSection title="8. 相关性与冗余">
+                  <StatGrid items={[
+                    ['Token Overlap', card.redundancy?.max_formula_token_overlap],
+                    ['Target Proxy', cardMetrics.IC ? Number(cardMetrics.IC) / 100 : undefined],
+                    ['Family', card.redundancy?.family],
+                    ['Nearest', card.redundancy?.nearest_factor || '--'],
+                  ]} />
+                  <div className="mt-3 rounded-2xl bg-white/80 p-3 text-xs leading-5 text-slate-700">
+                    {(card.gate_notes || []).map((note) => <div key={note}>{note}</div>)}
+                    {(card.risk_notes || []).map((note) => <div key={note}>{note}</div>)}
+                  </div>
+                </CardSection>
+              </div>
+            ) : null}
             <div className="rounded-3xl border border-border/50 bg-slate-50 p-4">
               <div className="text-xs text-muted-foreground">公式</div>
               <pre className="mt-2 whitespace-pre-wrap break-all text-xs text-slate-700">{report.formula}</pre>
@@ -412,7 +636,13 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                         <div key={factor.run_id} className="rounded-2xl border border-border/50 bg-white p-3 shadow-sm">
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="truncate font-mono text-xs text-foreground">{factor.run_id}</div>
+                              {isSubmitReady(factor) ? (
+                                <button onClick={() => setSelectedRunId(factor.run_id)} className="block max-w-full truncate font-mono text-xs font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-4 hover:text-emerald-900">
+                                  {factor.run_id}
+                                </button>
+                              ) : (
+                                <div className="truncate font-mono text-xs text-foreground">{factor.run_id}</div>
+                              )}
                               <div className="mt-1 text-[11px] text-muted-foreground">Score {formatNumber(factor.Score, 2)} · IC {formatNumber(factor.IC, 3)}</div>
                             </div>
                             <div className={`rounded-full px-2 py-1 text-[10px] ${factor.PassGates ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
@@ -532,7 +762,13 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                     <tr key={factor.run_id} className="border-b border-border/20 transition-colors" style={{ background: factorRowBackground(factor, maxScore) }}>
                       <td className="px-3 py-3 font-semibold text-foreground">#{factor.rank}</td>
                       <td className="px-3 py-3 align-top">
-                        <div className="break-all font-mono text-xs text-foreground">{factor.run_id}</div>
+                        {isSubmitReady(factor) ? (
+                          <button onClick={() => setSelectedRunId(factor.run_id)} className="break-all text-left font-mono text-xs font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-4 hover:text-emerald-900">
+                            {factor.run_id}
+                          </button>
+                        ) : (
+                          <div className="break-all font-mono text-xs text-foreground">{factor.run_id}</div>
+                        )}
                         <div className="mt-1 text-[11px] text-muted-foreground">{formatDateTime(factor.created_at)}</div>
                       </td>
                       <td className="px-3 py-3 text-right font-semibold text-foreground">{formatNumber(factor.Score, 2)}</td>
@@ -587,11 +823,11 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                         </div>
                         <div className="mt-1 text-[11px] text-muted-foreground">{statusText(factor.status)}</div>
                       </td>
-                      <td className="px-3 py-3 text-center align-top">
+                      <td className="px-3 py-3 align-top">
                         {factor.live_submitted && factor.live_test_result ? (
                           <HoverCard>
                             <HoverCardTrigger asChild>
-                              <button onClick={() => openLiveResultModal(factor)} className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-200">
+                              <button onClick={() => openLiveResultModal(factor)} className={submittedButtonClass}>
                                 已提交
                               </button>
                             </HoverCardTrigger>
@@ -617,18 +853,18 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                             </HoverCardContent>
                           </HoverCard>
                         ) : (
-                          <button onClick={() => openLiveResultModal(factor)} className="rounded-full border border-border/60 px-3 py-1 text-xs text-foreground transition-colors hover:bg-white">
+                          <button onClick={() => openLiveResultModal(factor)} className={actionButtonClass}>
                             填入
                           </button>
                         )}
                       </td>
-                      <td className="px-3 py-3 text-center">
+                      <td className="px-3 py-3 align-top">
                         {factor.research_path ? (
-                          <button onClick={() => setSelectedRunId(factor.run_id)} className="rounded-full border border-border/60 px-3 py-1 text-xs text-foreground transition-colors hover:bg-white">
+                          <button onClick={() => setSelectedRunId(factor.run_id)} className={actionButtonClass}>
                             查看
                           </button>
                         ) : (
-                          <span className="text-xs text-muted-foreground">-</span>
+                          <span className="inline-flex h-9 min-w-[4.75rem] items-center justify-center text-xs text-muted-foreground">-</span>
                         )}
                       </td>
                     </tr>
