@@ -134,7 +134,7 @@ def build_factor_card(
     redundancy: Optional[Dict[str, Any]] = None,
     thought_process: str = "",
 ) -> Dict[str, Any]:
-    """Build the factor card consumed by the LOG UI for submit-ready factors."""
+    """Build the factor card consumed by the AutoAlpha records UI for submit-ready factors."""
     daily_count = len(daily_ic) if daily_ic is not None else 0
     ic0 = _safe_float(ic_decay.get(0, ic_decay.get("0", 0.0)) if ic_decay else 0.0)
     half_life = "not observed"
@@ -167,8 +167,6 @@ def build_factor_card(
             "formula": formula,
             "inputs": _formula_inputs(formula),
             "update_frequency": "15-minute platform bar",
-            "prediction_horizon": "next submitted response bar; decay panel probes lagged bars",
-            "universe": "Scientech competition equity universe after trading_restriction filtering",
             "postprocess": "cross-sectional rank/clip or zscore/clip before submission",
         },
         "metrics": {
@@ -453,20 +451,20 @@ def _compute_regimes(daily_ic: pd.Series, resp_wide: pd.DataFrame) -> list[dict[
 
 def _compute_stability(daily_ic: pd.Series, alpha_wide: pd.DataFrame, resp_wide: pd.DataFrame, rest_wide: pd.DataFrame) -> Dict[str, Any]:
     if daily_ic is None or len(daily_ic) == 0:
-        return {"monthly_ic": [], "yearly_ic": [], "splits": [], "clipped_ic": 0.0}
+        return {
+            "monthly_ic": [],
+            "yearly_ic": [],
+            "full_sample_ic": 0.0,
+            "positive_month_ratio": 0.0,
+            "worst_month_ic": 0.0,
+            "best_month_ic": 0.0,
+            "clipped_ic": 0.0,
+        }
 
     dated = daily_ic.copy()
     dated.index = pd.to_datetime(dated.index)
     monthly = dated.groupby(dated.index.to_period("M")).mean()
     yearly = dated.groupby(dated.index.year).mean()
-    n = len(dated)
-    splits = []
-    for label, subset in {
-        "Train": dated.iloc[: max(1, n // 3)],
-        "Val": dated.iloc[max(1, n // 3): max(2, 2 * n // 3)],
-        "Test": dated.iloc[max(2, 2 * n // 3):],
-    }.items():
-        splits.append({"split": label, "ic": _round4(subset.mean() if len(subset) else 0.0), "days": int(len(subset))})
 
     clipped_ic_vals: list[float] = []
     clipped_alpha = alpha_wide.clip(
@@ -490,9 +488,51 @@ def _compute_stability(daily_ic: pd.Series, alpha_wide: pd.DataFrame, resp_wide:
     return {
         "monthly_ic": _compress_series(monthly, max_points=36),
         "yearly_ic": [{"x": str(index), "value": _round4(value)} for index, value in yearly.items()],
-        "splits": splits,
+        "full_sample_ic": _round4(dated.mean()),
+        "positive_month_ratio": _round4((monthly > 0).mean() if len(monthly) else 0.0),
+        "worst_month_ic": _round4(monthly.min() if len(monthly) else 0.0),
+        "best_month_ic": _round4(monthly.max() if len(monthly) else 0.0),
         "clipped_ic": _round4(np.mean(clipped_ic_vals) if clipped_ic_vals else 0.0),
     }
+
+
+def _zscore_series(series: pd.Series, max_points: int = 120) -> list[dict[str, Any]]:
+    if series is None or len(series) == 0:
+        return []
+    clean = pd.Series(series).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(clean) == 0:
+        return []
+    std = clean.std()
+    if pd.isna(std) or abs(float(std)) < 1e-12:
+        z = clean * 0.0
+    else:
+        z = (clean - clean.mean()) / std
+    return _compress_series(z, max_points=max_points)
+
+
+def _standardize_series(series: pd.Series) -> pd.Series:
+    clean = pd.Series(series).replace([np.inf, -np.inf], np.nan)
+    std = clean.std()
+    if pd.isna(std) or abs(float(std)) < 1e-12:
+        return clean * 0.0
+    return (clean - clean.mean()) / std
+
+
+def _merge_named_series(series_map: Dict[str, pd.Series], max_points: int = 120) -> list[dict[str, Any]]:
+    frame = pd.DataFrame(series_map).replace([np.inf, -np.inf], np.nan).dropna(how="all")
+    if frame.empty:
+        return []
+    if len(frame) > max_points:
+        idx = np.linspace(0, len(frame) - 1, max_points).astype(int)
+        frame = frame.iloc[idx]
+    rows: list[dict[str, Any]] = []
+    for idx, row in frame.iterrows():
+        item: dict[str, Any] = {"x": str(idx)}
+        for key, value in row.items():
+            if pd.notna(value):
+                item[key] = _round4(value)
+        rows.append(item)
+    return rows
 
 
 def _compute_redundancy(formula: str) -> Dict[str, Any]:
@@ -676,11 +716,40 @@ def analyze_factor(
         ic_decay = _compute_ic_decay(alpha_wide, resp_wide, rest_wide, max_lag=10)
         daily_ic = _compute_daily_ic(alpha_wide, resp_wide, rest_wide)
         daily_rank_ic = _compute_daily_rank_ic(alpha_wide, resp_wide, rest_wide)
+
+        market_state: list[dict[str, Any]] = []
+        try:
+            pv_slice = hub.pv_15m.loc[hub.pv_15m.index.get_level_values("date").isin(day_ts)]
+            price_col = "close_trade_px" if "close_trade_px" in pv_slice.columns else (
+                "close_mid_px" if "close_mid_px" in pv_slice.columns else ""
+            )
+            amount_col = "dvolume" if "dvolume" in pv_slice.columns else (
+                "volume" if "volume" in pv_slice.columns else ""
+            )
+            if price_col:
+                price_wide = _filter_allowed(pv_slice[price_col]).unstack("security_id").reindex_like(alpha_wide)
+                price_index = price_wide.mean(axis=1).ffill()
+                price_return_index = price_index.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0).cumsum()
+                market_series = {
+                    "ic": _standardize_series(pd.Series(daily_ic).reindex(alpha_wide.index)),
+                    "price": _standardize_series(price_return_index),
+                    "volatility": _standardize_series(resp_wide.std(axis=1)),
+                }
+                if amount_col:
+                    amount_wide = _filter_allowed(pv_slice[amount_col]).unstack("security_id").reindex_like(alpha_wide)
+                    market_series["liquidity"] = _standardize_series(amount_wide.mean(axis=1))
+                else:
+                    market_series["liquidity"] = pd.Series(dtype=float)
+                market_state = _merge_named_series(market_series, max_points=120)
+        except Exception as exc:
+            print(f"  [research] Market-state chart data failed: {exc}")
+
         temporal = {
             "daily_mean": _compress_series(alpha_wide.mean(axis=1), max_points=80),
             "daily_std": _compress_series(alpha_wide.std(axis=1), max_points=80),
             "coverage": _compress_series(alpha_wide.notna().mean(axis=1), max_points=80),
             "rolling_drift": _compress_series(alpha_wide.mean(axis=1).rolling(20, min_periods=5).mean(), max_points=80),
+            "market_state": market_state,
         }
         group_returns = _compute_group_returns(alpha_wide, resp_wide, rest_wide)
         regimes = _compute_regimes(daily_ic, resp_wide)

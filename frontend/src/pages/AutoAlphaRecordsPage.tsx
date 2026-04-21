@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -119,6 +120,7 @@ function formatNumber(value: number, digits = 2) {
 }
 
 function formatMetric(value: any, digits = 4) {
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
   const num = Number(value);
   if (!Number.isFinite(num)) return value === undefined || value === null || value === '' ? '--' : String(value);
   return num.toFixed(digits);
@@ -148,7 +150,7 @@ function truncate(text: string, length: number) {
 }
 
 function isSubmitReady(factor: KbFactor) {
-  return Boolean(factor.PassGates && factor.factor_card_path);
+  return Boolean(factor.factor_card_path || factor.research_path);
 }
 
 function liveResultMetrics(result?: LiveTestResult) {
@@ -240,19 +242,32 @@ const SmallChart = ({
   type = 'line',
   color = '#0f766e',
   height = 150,
+  title,
+  description,
 }: {
   data?: Array<Record<string, any>>;
   type?: 'line' | 'bar';
   color?: string;
   height?: number;
+  title?: string;
+  description?: string;
 }) => {
   const chartData = (data || []).slice(-80);
   if (!chartData.length) {
-    return <div className="flex h-[150px] items-center justify-center rounded-2xl bg-slate-50 text-xs text-muted-foreground">暂无序列</div>;
+    return (
+      <div className="rounded-2xl bg-white/80 p-3">
+        {title ? <div className="text-xs font-semibold text-foreground">{title}</div> : null}
+        {description ? <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{description}</div> : null}
+        <div className="mt-2 flex h-[150px] items-center justify-center rounded-2xl bg-slate-50 text-xs text-muted-foreground">暂无序列</div>
+      </div>
+    );
   }
   return (
-    <div style={{ height }} className="rounded-2xl bg-white/80 p-2">
-      <ResponsiveContainer width="100%" height="100%">
+    <div className="rounded-2xl bg-white/80 p-3">
+      {title ? <div className="text-xs font-semibold text-foreground">{title}</div> : null}
+      {description ? <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{description}</div> : null}
+      <div style={{ height }} className="mt-2">
+        <ResponsiveContainer width="100%" height="100%">
         {type === 'bar' ? (
           <BarChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -270,7 +285,48 @@ const SmallChart = ({
             <Line type="monotone" dataKey="value" stroke={color} strokeWidth={2} dot={false} />
           </LineChart>
         )}
-      </ResponsiveContainer>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+};
+
+const MultiLineChart = ({
+  data,
+  lines,
+  height = 220,
+  title,
+  description,
+}: {
+  data?: Array<Record<string, any>>;
+  lines: Array<{ key: string; name: string; color: string }>;
+  height?: number;
+  title: string;
+  description?: string;
+}) => {
+  const chartData = (data || []).slice(-120);
+  return (
+    <div className="rounded-2xl bg-white/80 p-3">
+      <div className="text-xs font-semibold text-foreground">{title}</div>
+      {description ? <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{description}</div> : null}
+      {!chartData.length ? (
+        <div className="mt-2 flex h-[180px] items-center justify-center rounded-2xl bg-slate-50 text-xs text-muted-foreground">暂无序列</div>
+      ) : (
+        <div style={{ height }} className="mt-2">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="x" tick={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10 }} width={38} />
+              <Tooltip formatter={(value: any) => formatMetric(value)} labelFormatter={(label) => String(label)} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {lines.map((line) => (
+                <Line key={line.key} type="monotone" dataKey={line.key} name={line.name} stroke={line.color} strokeWidth={2} dot={false} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   );
 };
@@ -323,7 +379,7 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
       <div className="max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-border/50 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="mb-5 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">LOG</div>
+            <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Factor Card</div>
             <div className="mt-2 text-xl font-semibold text-foreground">{runId}</div>
           </div>
           <button onClick={onClose} className="rounded-full border border-border/60 px-3 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground">
@@ -331,7 +387,7 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
           </button>
         </div>
         {error ? <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-600">{error}</div> : null}
-        {!report && !error ? <div className="text-sm text-muted-foreground">LOG 加载中...</div> : null}
+        {!report && !error ? <div className="text-sm text-muted-foreground">Factor Card 加载中...</div> : null}
         {report ? (
           <div className="space-y-4">
             {card && card.status === 'PASS' ? (
@@ -360,15 +416,20 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
                     <div className="grid gap-2 md:grid-cols-2">
                       <div>输入字段：{(card.definition?.inputs || []).join(', ') || '--'}</div>
                       <div>更新频率：{card.definition?.update_frequency || '15-minute'}</div>
-                      <div>预测周期：{card.definition?.prediction_horizon || '--'}</div>
-                      <div>适用标的：{card.definition?.universe || '--'}</div>
+                      <div>后处理：{card.definition?.postprocess || '--'}</div>
                     </div>
                     <div>{card.thesis}</div>
                   </div>
                 </CardSection>
                 <CardSection title="2. 历史分布">
                   <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
-                    <SmallChart data={(card.histogram || []).map((row) => ({ x: row.bin, value: row.value }))} type="bar" color="#7c3aed" />
+                    <SmallChart
+                      title="因子取值直方图"
+                      description="横轴是因子值区间，柱越高表示该区间出现越多；过度偏斜或极端值过多会带来不稳定。"
+                      data={(card.histogram || []).map((row) => ({ x: row.bin, value: row.value }))}
+                      type="bar"
+                      color="#7c3aed"
+                    />
                     <StatGrid items={[
                       ['P1', card.distribution?.p1], ['P5', card.distribution?.p5], ['P50', card.distribution?.p50], ['P95', card.distribution?.p95],
                       ['P99', card.distribution?.p99], ['Mean', card.distribution?.mean], ['Std', card.distribution?.std], ['Skew', card.distribution?.skew],
@@ -378,9 +439,9 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
                 </CardSection>
                 <CardSection title="3. 时序演变">
                   <div className="grid gap-3 md:grid-cols-3">
-                    <SmallChart data={card.temporal?.daily_mean} color="#0f766e" />
-                    <SmallChart data={card.temporal?.daily_std} color="#2563eb" />
-                    <SmallChart data={card.temporal?.coverage} color="#f97316" />
+                    <SmallChart title="日均因子暴露" description="看因子整体方向是否长期漂移；持续单边漂移通常需要检查归一化。" data={card.temporal?.daily_mean} color="#0f766e" />
+                    <SmallChart title="日内截面离散度" description="数值越高，股票间区分度越强；塌缩到低位代表信号信息不足。" data={card.temporal?.daily_std} color="#2563eb" />
+                    <SmallChart title="有效覆盖率" description="接近 1 表示大部分标的有因子值；突然下坠要检查缺失或限制过滤。" data={card.temporal?.coverage} color="#f97316" />
                   </div>
                 </CardSection>
                 <CardSection title="4. 预测力">
@@ -389,7 +450,7 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
                       ['IC Mean', card.prediction?.ic_mean ?? cardMetrics.IC], ['ICIR', card.prediction?.icir ?? cardMetrics.IR],
                       ['Rank IC', card.prediction?.rank_ic], ['Half Life', diagnostics.ic_half_life],
                     ]} />
-                    <SmallChart data={card.prediction?.rolling_ic} color="#0f766e" />
+                    <SmallChart title="20 日滚动 IC" description="线上越稳定高于 0，说明近期预测方向越稳定；穿 0 表示信号可能换 regime。" data={card.prediction?.rolling_ic} color="#0f766e" />
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
                     {(card.prediction?.horizon_ic || []).map((row: any) => (
@@ -402,14 +463,25 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
                 </CardSection>
                 <CardSection title="5. 表现分层图">
                   <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
-                    <SmallChart data={(card.layering?.decile_returns_bps || []).map((row: any) => ({ x: `Q${row.bucket}`, value: row.value }))} type="bar" color="#0ea5e9" />
+                    <SmallChart title="因子分位收益" description="Q10 高于 Q1 表示因子排序和未来收益同向；单调性越强，信号越可信。" data={(card.layering?.decile_returns_bps || []).map((row: any) => ({ x: `Q${row.bucket}`, value: row.value }))} type="bar" color="#0ea5e9" />
                     <div>
                       <StatGrid items={[['Top-Bottom bps', card.layering?.top_minus_bottom_bps], ['Score', cardMetrics.Score], ['TVR', cardMetrics.tvr], ['Days', cardMetrics.nd]]} />
-                      <div className="mt-3"><SmallChart data={card.layering?.cumulative_top_minus_bottom} color="#16a34a" height={120} /></div>
+                      <div className="mt-3"><SmallChart title="多空分层累计收益" description="累计线上行代表高分位组合持续跑赢低分位组合。" data={card.layering?.cumulative_top_minus_bottom} color="#16a34a" height={120} /></div>
                     </div>
                   </div>
                 </CardSection>
                 <CardSection title="6. 什么时候表现好">
+                  <MultiLineChart
+                    title="IC 与市场状态同图"
+                    description="全部序列已标准化到同一坐标：IC 上行且价格/波动/成交额处在对应位置时，就是这个因子更适合的市场环境。"
+                    data={card.temporal?.market_state}
+                    lines={[
+                      { key: 'ic', name: 'IC', color: '#0f766e' },
+                      { key: 'price', name: '价格指数', color: '#2563eb' },
+                      { key: 'volatility', name: '波动', color: '#f97316' },
+                      { key: 'liquidity', name: '成交额', color: '#7c3aed' },
+                    ]}
+                  />
                   <div className="grid gap-2 md:grid-cols-3">
                     {(card.regime || []).map((row) => (
                       <div key={String(row.regime)} className="rounded-2xl bg-white/85 p-3">
@@ -422,9 +494,12 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
                 </CardSection>
                 <CardSection title="7. 稳定性">
                   <div className="grid gap-3 lg:grid-cols-[1fr_1.2fr]">
-                    <SmallChart data={card.stability?.monthly_ic} color="#9333ea" />
+                    <SmallChart title="月度 IC" description="按自然月统计全样本 IC，不再拆 Train/Val/Test；越少跨月翻负越稳定。" data={card.stability?.monthly_ic} color="#9333ea" />
                     <StatGrid items={[
-                      ...(card.stability?.splits || []).map((row: any) => [row.split, row.ic] as [string, any]),
+                      ['全样本 IC', card.stability?.full_sample_ic],
+                      ['月度为正占比', card.stability?.positive_month_ratio],
+                      ['最差月 IC', card.stability?.worst_month_ic],
+                      ['最好月 IC', card.stability?.best_month_ic],
                       ['Clipped IC', card.stability?.clipped_ic],
                     ]} />
                   </div>
@@ -451,7 +526,7 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
               {['IC', 'IR', 'Turnover', 'Score', 'PassGates'].map((key) => (
                 <div key={key} className="rounded-2xl border border-border/50 bg-white p-3">
                   <div className="text-[11px] text-muted-foreground">{key}</div>
-                  <div className="mt-2 font-semibold text-foreground">{String(report.metrics?.[key] ?? '--')}</div>
+                  <div className="mt-2 break-words font-mono font-semibold text-foreground">{formatMetric(report.metrics?.[key])}</div>
                 </div>
               ))}
             </div>
@@ -597,7 +672,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
 
   return (
     <div className="space-y-6 pb-10">
-      <Panel title="AutoAlpha 记录库" subtitle="Generation 演进、产出文件、LOG 和知识库因子表">
+      <Panel title="AutoAlpha 记录库" subtitle="Generation 演进、产出文件、因子卡片和知识库因子表">
         <div className="grid gap-4 md:grid-cols-4">
           <div className="rounded-3xl bg-white/80 p-4">
             <div className="text-xs text-muted-foreground">已测试</div>
@@ -636,8 +711,8 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                         <div key={factor.run_id} className="rounded-2xl border border-border/50 bg-white p-3 shadow-sm">
                           <div className="flex items-center justify-between gap-3">
                             <div className="min-w-0">
-                              {isSubmitReady(factor) ? (
-                                <button onClick={() => setSelectedRunId(factor.run_id)} className="block max-w-full truncate font-mono text-xs font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-4 hover:text-emerald-900">
+                              {factor.factor_card_path || factor.research_path ? (
+                                <button onClick={() => setSelectedRunId(factor.run_id)} className="block max-w-full truncate font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900">
                                   {factor.run_id}
                                 </button>
                               ) : (
@@ -669,7 +744,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
         </div>
       </Panel>
 
-      <Panel title="文件与 LOG 留存">
+      <Panel title="文件与因子卡片留存">
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
@@ -700,10 +775,10 @@ export const AutoAlphaRecordsPage: React.FC = () => {
           </div>
 
           <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
-            <div className="mb-3 text-sm font-medium text-foreground">LOG 索引</div>
+            <div className="mb-3 text-sm font-medium text-foreground">因子卡片索引</div>
             <div className="max-h-[460px] space-y-3 overflow-y-auto pr-2">
               {researchReports.length === 0 ? (
-                <div className="text-sm text-muted-foreground">当前还没有 LOG 文件。</div>
+                <div className="text-sm text-muted-foreground">当前还没有因子卡片文件。</div>
               ) : (
                 researchReports.map((report) => (
                   <div key={report.path} className="rounded-2xl border border-border/50 bg-slate-50 p-3">
@@ -730,7 +805,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
 
       <Panel title="知识库因子表" subtitle="Score 为 0 或未通过 Gate 的因子会在 Status/Gate 列注明原因，不同失败原因会用不同底色标记整行。">
         <div className="max-h-[720px] overflow-auto rounded-3xl border border-border/40 bg-white/70">
-          <table className="min-w-[1620px] table-fixed text-sm">
+          <table className="min-w-[1500px] table-fixed text-sm">
             <thead className="sticky top-0 z-10 bg-white">
               <tr className="border-b border-border/50 text-left text-xs uppercase tracking-[0.18em] text-muted-foreground">
                 <th className="w-16 px-3 py-3">Rank</th>
@@ -745,13 +820,12 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                 <th className="w-[22rem] px-3 py-3">Thought</th>
                 <th className="w-48 px-3 py-3">Status/Gate</th>
                 <th className="w-24 px-3 py-3 text-center">Lab Test</th>
-                <th className="w-20 px-3 py-3 text-center">LOG</th>
               </tr>
             </thead>
             <tbody>
               {factors.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="px-3 py-12 text-center text-sm text-muted-foreground">
+                  <td colSpan={12} className="px-3 py-12 text-center text-sm text-muted-foreground">
                     还没有因子记录。启动循环后，这里会持续刷新。
                   </td>
                 </tr>
@@ -763,7 +837,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                       <td className="px-3 py-3 font-semibold text-foreground">#{factor.rank}</td>
                       <td className="px-3 py-3 align-top">
                         {isSubmitReady(factor) ? (
-                          <button onClick={() => setSelectedRunId(factor.run_id)} className="break-all text-left font-mono text-xs font-medium text-emerald-700 underline decoration-emerald-300 underline-offset-4 hover:text-emerald-900">
+                          <button onClick={() => setSelectedRunId(factor.run_id)} className="break-all text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900">
                             {factor.run_id}
                           </button>
                         ) : (
@@ -843,7 +917,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                                     return (
                                       <div key={key} className="rounded-xl bg-slate-50 p-2">
                                         <div className="text-[10px] text-muted-foreground">{key}</div>
-                                        <div className="mt-1 font-mono text-foreground">{String(metrics[key] ?? '--')}</div>
+                                        <div className="mt-1 break-words font-mono text-foreground">{formatMetric(metrics[key])}</div>
                                       </div>
                                     );
                                   })}
@@ -856,15 +930,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                           <button onClick={() => openLiveResultModal(factor)} className={actionButtonClass}>
                             填入
                           </button>
-                        )}
-                      </td>
-                      <td className="px-3 py-3 align-top">
-                        {factor.research_path ? (
-                          <button onClick={() => setSelectedRunId(factor.run_id)} className={actionButtonClass}>
-                            查看
-                          </button>
-                        ) : (
-                          <span className="inline-flex h-9 min-w-[4.75rem] items-center justify-center text-xs text-muted-foreground">-</span>
                         )}
                       </td>
                     </tr>
