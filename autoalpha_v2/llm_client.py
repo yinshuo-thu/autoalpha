@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterable, List
 import requests
 
 from autoalpha_v2.error_utils import AutoAlphaRuntimeError, as_runtime_error
-from autoalpha_v2.inspiration_db import compose_inspiration_context
+from autoalpha_v2.inspiration_db import compose_inspiration_context_with_sources
 from autoalpha_v2.knowledge_base import get_generation_guidance
 from runtime_config import get_llm_routing, openai_chat_completions_url, load_runtime_config
 
@@ -405,8 +405,22 @@ def generate_idea(
     """
     cfg = load_runtime_config()
     context_limit = int(cfg.get("AUTOALPHA_PROMPT_CONTEXT_LIMIT", "6") or 6)
-    inspiration_text = inspirations or compose_inspiration_context(limit=max(1, context_limit))
+    if inspirations:
+        inspiration_text = inspirations
+        inspiration_rows: list[dict[str, Any]] = []
+    else:
+        inspiration_text, inspiration_rows = compose_inspiration_context_with_sources(limit=max(1, context_limit))
     guidance = get_generation_guidance()
+    source_types = [
+        str(row.get("source_type") or row.get("kind") or "manual")
+        for row in inspiration_rows
+    ]
+    source_ids = [
+        int(row.get("id"))
+        for row in inspiration_rows
+        if row.get("id") is not None
+    ]
+    primary_source = source_types[idea_index % len(source_types)] if source_types else ("custom" if inspirations else "none")
 
     archetype = ARCHETYPES[idea_index % len(ARCHETYPES)]
 
@@ -499,4 +513,8 @@ def generate_idea(
     )
 
     messages.append({"role": "user", "content": "\n\n".join(sections)})
-    return call_llm(messages, max_tokens=700, tier="reasoning")
+    idea = call_llm(messages, max_tokens=700, tier="reasoning")
+    idea["inspiration_source_type"] = primary_source
+    idea["inspiration_source_types"] = sorted(set(source_types))
+    idea["inspiration_ids"] = source_ids
+    return idea

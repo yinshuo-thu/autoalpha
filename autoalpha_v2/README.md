@@ -1,9 +1,11 @@
-# AutoAlpha v2
+# Auto Alpha Research Factory v2
 
 This is a clean code-only copy for restarting AutoAlpha from scratch. Runtime
 state and generated artifacts are intentionally excluded: no `knowledge.json`,
 no parquet outputs, no research reports, no submit files, no model cache, and no
 local database.
+
+![Auto Alpha Research Factory v2](v2.png)
 
 AutoAlpha is the factor research pipeline used in this workspace. It generates
 intraday alpha ideas, validates formulas, computes 15-minute alpha files,
@@ -47,11 +49,12 @@ knowledge layer remembers both productive motifs and exhausted formula families.
 ## Difference From v0
 
 The repository root still contains the earlier v0-style research stack described
-in `/Volumes/T7/Scientech/README.md`: manual/EA/LLM scripts, general DSL
-parsing, local leaderboard tracking, backtest helpers, and submission utilities.
-AutoAlpha v2 is narrower and stricter. It keeps the useful v0 infrastructure but
-wraps it in an operational loop whose outputs are immediately auditable and
-submit-ready.
+in `/Volumes/T7/Scientech` outside `autoalpha_v1/` and `autoalpha_v2/`: manual
+factor scripts, EA/LLM loops, general DSL parsing, leaderboard tracking,
+backtest helpers, submission utilities, and many exploratory artifacts.
+AutoAlpha v2 is narrower and stricter. It keeps the useful project-level
+infrastructure but wraps it in an operational research factory whose outputs are
+auditable, source-attributed, and submit-ready.
 
 | Area | v0 root workflow | AutoAlpha v2 |
 |------|------------------|--------------|
@@ -60,7 +63,8 @@ submit-ready.
 | Artifact policy | Many exploratory outputs live under `outputs/`, `research/`, `submit/`, and manual reports. | Passing factors get canonical `.pq`, metadata, official-like result JSON, report, and factor card under `autoalpha_v2/submit` and `autoalpha_v2/research`. |
 | Knowledge memory | Leaderboard and logs guide later iterations informally. | `knowledge.json` stores every tested factor, failure reason, parent lineage, fingerprints, card paths, lab-test results, and generation summaries. |
 | Agent feedback | Top formulas can be reused, but failure families are less explicit. | LLM prompts receive strong examples, recent weak examples, productive operator pairs, and saturated structural families. |
-| Frontend | General dashboard/backend integration. | Dedicated AutoAlpha cockpit: quota/status, prompt lab, rolling model lab, generation records, submit-card links, and inspiration database. |
+| Inspiration sources | Prompting is mostly ad hoc or tied to one script run. | ArXiv, LLM brainstorms, and local `fut_feat/*.md` futures-factor notes are synced into one inspiration database and attributed to generated factors. |
+| Frontend | General dashboard/backend integration. | Dedicated AutoAlpha cockpit: quota/status, prompt lab, rolling model lab, generation records, submit-card links, inspiration database, and source-conversion charts. |
 | Submission safety | Submission helpers exist but can be called independently. | Submit readiness is a gate-controlled state; only `PassGates=true` factors are copied to `autoalpha_v2/submit` and rendered with factor cards. |
 
 ## What v2 Keeps From v1
@@ -310,7 +314,7 @@ old `knowledge.json` values:
 # Recompute only factors that previously had PassGates=true.
 python autoalpha_v2/recompute_gate_factors.py
 
-# Faster: keep existing LOG reports and only refresh pq + metrics.
+# Faster: keep existing research reports and only refresh pq + metrics.
 python autoalpha_v2/recompute_gate_factors.py --skip-research
 
 # Recompute every factor in knowledge.json.
@@ -336,23 +340,19 @@ exact metrics used by the UI.
 The AutoAlpha records page shows:
 
 - generation lineage;
-- output and LOG artifacts;
-- the factor table with `Status/Gate`, `Lab Test`, and `LOG` columns;
+- output and factor-card artifacts;
+- the factor table with `Status/Gate` and `Lab Test` columns; factor IDs open cards directly;
 - distinct row colors for failure reasons, unsubmitted passing factors, and
   factors with filled Lab Test results.
 
 Lab Test results can be pasted into the row modal. They are stored back into the
 knowledge base and displayed separately from local official-like metrics.
 
-## Frontend Examples
+## Frontend
 
-AutoAlpha v1 includes three main frontend surfaces.
-
-![AutoAlpha cockpit](docs/images/frontend-autoalpha.png)
-
-![AutoAlpha research records](docs/images/frontend-records.png)
-
-![AutoAlpha inspiration library](docs/images/frontend-inspirations.png)
+The v2 records page adds source-conversion charts for ArXiv / LLM / Future
+inspirations: source count, passing factor count, pass rate, valid factors per
+prompt, and each source's share of all valid factors.
 
 ## Useful Commands
 

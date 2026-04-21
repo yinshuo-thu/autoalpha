@@ -479,6 +479,16 @@ def run(
             friendly, suggestion, _, raw = humanize_error(e)
             return i, None, {"friendly": friendly, "suggestion": suggestion, "raw": raw}
 
+    def _source_fields(idea: dict[str, Any]) -> dict[str, Any]:
+        source_type = idea.get("inspiration_source_type") or "none"
+        source_types = idea.get("inspiration_source_types") or []
+        inspiration_ids = idea.get("inspiration_ids") or []
+        return {
+            "inspiration_source_type": source_type,
+            "inspiration_source_types": source_types,
+            "inspiration_ids": inspiration_ids,
+        }
+
     with ThreadPoolExecutor(max_workers=idea_concurrency) as pool:
         futures = {pool.submit(_fetch_one_idea, i): i for i in range(n_ideas)}
         for fut in _as_completed(futures):
@@ -494,6 +504,7 @@ def run(
                         "idea_index": i + 1,
                         "formula": idea.get("formula", ""),
                         "thought_process": idea.get("thought_process", ""),
+                        **_source_fields(idea),
                     },
                 )
             elif err:
@@ -549,6 +560,7 @@ def run(
                 "run_id": run_id,
                 "formula": formula,
                 "thought_process": idea.get("thought_process", ""),
+                **_source_fields(idea),
                 "status": "duplicate",
                 "errors": "Duplicate formula signature already exists in knowledge base or current batch.",
             })
@@ -568,6 +580,7 @@ def run(
                 "run_id": run_id,
                 "formula": formula,
                 "thought_process": idea.get("thought_process", ""),
+                **_source_fields(idea),
                 "status": "invalid",
                 "errors": vr.errors,
             })
@@ -603,6 +616,7 @@ def run(
                 "run_id": run_id,
                 "formula": formula,
                 "thought_process": idea.get("thought_process", ""),
+                **_source_fields(idea),
                 "status": "compute_error",
                 "error": str(e),
             })
@@ -653,6 +667,7 @@ def run(
                 "run_id": run_id,
                 "formula": formula,
                 "thought_process": idea.get("thought_process", ""),
+                **_source_fields(idea),
                 "postprocess": postmode,
                 "lookback_days": lookback,
                 "status": "screened_out",
@@ -719,6 +734,7 @@ def run(
                 "run_id": run_id,
                 "formula": formula,
                 "thought_process": idea.get("thought_process", ""),
+                **_source_fields(idea),
                 "status": "compute_error",
                 "error": str(e),
             })
@@ -761,6 +777,7 @@ def run(
             "run_id":         run_id,
             "formula":        formula,
             "thought_process": idea.get("thought_process", ""),
+            **_source_fields(idea),
             "postprocess":    postmode,
             "lookback_days":  lookback,
             "status":         "ok",

@@ -273,6 +273,34 @@ def list_recent_inspirations(limit: int = 12) -> List[Dict[str, Any]]:
     return rows
 
 
+def get_recent_inspiration_context_rows(limit: int = 6) -> List[Dict[str, Any]]:
+    """Rows used to build the LLM inspiration context."""
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM inspirations
+            WHERE status = 'active'
+            ORDER BY quality_score DESC, created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return rows
+
+
+def list_inspiration_source_counts() -> List[Dict[str, Any]]:
+    with _get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_type, COUNT(*) AS count
+            FROM inspirations
+            WHERE status = 'active'
+            GROUP BY source_type
+            """
+        ).fetchall()
+    return rows
+
+
 def list_inspirations_paginated(
     page: int = 1,
     per_page: int = 20,
@@ -376,7 +404,7 @@ def sync_prompt_directory(limit: int = 80) -> Dict[str, Any]:
 
 def compose_inspiration_context(limit: int = 6, max_chars: int = 2400) -> str:
     sync_prompt_directory(limit=80)
-    rows = list_recent_inspirations(limit=limit)
+    rows = get_recent_inspiration_context_rows(limit=limit)
     if not rows:
         return ""
 
@@ -391,3 +419,27 @@ def compose_inspiration_context(limit: int = 6, max_chars: int = 2400) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def compose_inspiration_context_with_sources(
+    limit: int = 6,
+    max_chars: int = 2400,
+) -> tuple[str, List[Dict[str, Any]]]:
+    sync_prompt_directory(limit=80)
+    rows = get_recent_inspiration_context_rows(limit=limit)
+    if not rows:
+        return "", []
+
+    lines: List[str] = []
+    used: List[Dict[str, Any]] = []
+    total = 0
+    for row in rows:
+        source = row.get("source") or row.get("relative_path") or ""
+        summary = row.get("summary") or _heuristic_summary(row.get("content", ""))
+        line = f"- [{row.get('source_type', row.get('kind', 'manual'))}] {row.get('title')}: {summary} (source: {source})"
+        total += len(line)
+        if total > max_chars:
+            break
+        lines.append(line)
+        used.append(row)
+    return "\n".join(lines), used

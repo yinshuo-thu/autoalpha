@@ -5,6 +5,7 @@ Multi-source inspiration fetcher.  Supported sources:
   - arxiv   : query the public ArXiv API for quant-finance papers
   - url     : fetch any HTTP URL (WeChat articles, blog posts, …)
   - llm     : ask the cheap LLM model to brainstorm new alpha directions
+  - future  : distill local futures-factor Markdown notes from fut_feat/
 
 The module exposes a lightweight background-thread scheduler so loop.py
 can call `start_background_fetcher()` once and forget about it.
@@ -45,6 +46,7 @@ _ARXIV_QUERIES = [
 # ─── Curated URL sources ─────────────────────────────────────────────────────
 # WeChat / blog articles the user may want to regularly harvest
 _DEFAULT_URL_SOURCES: List[str] = []   # populated by add_url_source() or config
+_FUTURE_MD_DIR = AUTOALPHA_DIR.parent / "fut_feat"
 
 # ─── LLM-generated brainstorm prompt ─────────────────────────────────────────
 _LLM_BRAINSTORM_SYSTEM = """\
@@ -230,6 +232,44 @@ def generate_llm_inspirations(n: int = 6) -> List[Dict[str, Any]]:
     return records
 
 
+# ─── Local futures-factor notes ──────────────────────────────────────────────
+
+def fetch_future_factor_inspirations(max_files: int = 10) -> List[Dict[str, Any]]:
+    """Read local fut_feat Markdown notes and convert them to inspiration records."""
+    if not _FUTURE_MD_DIR.is_dir():
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for path in sorted(_FUTURE_MD_DIR.glob("*.md"))[:max_files]:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            print(f"[fetcher] Future-factor note read failed ({path}): {exc}")
+            continue
+        if not raw:
+            continue
+
+        title = raw.splitlines()[0].lstrip("# ").strip() if raw.splitlines() else path.stem
+        title = title or path.stem
+        content = _trim_text(raw, limit=9000)
+        source_hash = hashlib.sha256(f"future:{path.name}:{content}".encode("utf-8")).hexdigest()
+        records.append({
+            "kind": "prompt",
+            "title": f"Future factor: {title[:64]}",
+            "source": str(path),
+            "content": content,
+            "summary": _heuristic_summary(content),
+            "tags": "future,futures-factor,local-markdown",
+            "relative_path": f"inspirations/future_{path.stem}.md",
+            "source_hash": source_hash,
+            "source_type": "future",
+            "arxiv_id": "",
+            "published_date": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+            "quality_score": 0.6,
+        })
+    return records
+
+
 # ─── Full fetch cycle ─────────────────────────────────────────────────────────
 
 def run_fetch_cycle(
@@ -237,13 +277,14 @@ def run_fetch_cycle(
     extra_urls: Optional[List[str]] = None,
     llm_ideas: int = 6,
     arxiv_per_query: int = 5,
+    future_files: int = 10,
 ) -> Dict[str, Any]:
     """
     Run one full inspiration-fetch cycle.
     Returns a summary dict of what was added.
     """
     queries = arxiv_queries or _ARXIV_QUERIES
-    added = {"arxiv": 0, "url": 0, "llm": 0, "skipped": 0}
+    added = {"arxiv": 0, "url": 0, "llm": 0, "future": 0, "skipped": 0}
 
     # 1. ArXiv — rotate through queries
     query = queries[int(time.time()) % len(queries)]
@@ -268,7 +309,15 @@ def run_fetch_cycle(
             else:
                 added["skipped"] += 1
 
-    # 3. LLM brainstorm
+    # 3. Local futures-factor Markdown notes
+    for rec in fetch_future_factor_inspirations(max_files=future_files):
+        result = save_inspiration(rec)
+        if result.get("was_new"):
+            added["future"] += 1
+        else:
+            added["skipped"] += 1
+
+    # 4. LLM brainstorm
     if llm_ideas > 0:
         for rec in generate_llm_inspirations(n=llm_ideas):
             result = save_inspiration(rec)
@@ -279,7 +328,7 @@ def run_fetch_cycle(
 
     print(
         f"[fetcher] Cycle done — arxiv={added['arxiv']} url={added['url']} "
-        f"llm={added['llm']} skipped={added['skipped']}"
+        f"llm={added['llm']} future={added['future']} skipped={added['skipped']}"
     )
     return added
 

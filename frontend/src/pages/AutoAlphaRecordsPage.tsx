@@ -4,6 +4,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
   LineChart,
@@ -59,6 +60,19 @@ interface KnowledgePayload {
   best_score: number;
   updated_at: string;
   pass_rate: number;
+  inspiration_stats?: {
+    by_source: Array<{
+      source: string;
+      prompt_count: number;
+      tested_count: number;
+      passing_count: number;
+      pass_rate: number;
+      valid_per_prompt: number;
+      valid_share: number;
+    }>;
+    timeline: Array<Record<string, any>>;
+    total_passing_attributed: number;
+  };
   factors: KbFactor[];
   artifacts: {
     output_files: AutoAlphaFile[];
@@ -351,6 +365,95 @@ const CardSection = ({ title, children }: { title: string; children: React.React
     {children}
   </div>
 );
+
+const sourceLabel = (source: string) => {
+  if (source === 'arxiv') return 'ArXiv';
+  if (source === 'llm') return 'LLM';
+  if (source === 'future') return 'Future';
+  return source;
+};
+
+const InspirationStatsCharts = ({ stats }: { stats?: KnowledgePayload['inspiration_stats'] }) => {
+  const bySource = stats?.by_source || [];
+  const timeline = stats?.timeline || [];
+  const sourceColors: Record<string, string> = {
+    arxiv: '#2563eb',
+    llm: '#7c3aed',
+    future: '#f97316',
+  };
+
+  if (!bySource.length && !timeline.length) {
+    return <div className="rounded-3xl bg-white/80 p-5 text-sm text-muted-foreground">暂无灵感源统计。抓取或同步灵感后，这里会显示来源转化率。</div>;
+  }
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-2">
+      <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
+        <div className="mb-3">
+          <div className="text-sm font-medium text-foreground">灵感源转化</div>
+          <div className="mt-1 text-xs text-muted-foreground">左轴为灵感次数 / passing 因子数，右轴为通过率。</div>
+        </div>
+        <div className="h-[280px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={bySource}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="source" tickFormatter={sourceLabel} tick={{ fontSize: 11 }} />
+              <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(value) => `${value}%`} />
+              <Tooltip formatter={(value: any) => formatMetric(value)} labelFormatter={(label) => sourceLabel(String(label))} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="left" dataKey="prompt_count" name="灵感次数" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+              <Bar yAxisId="left" dataKey="passing_count" name="Passing 因子" fill="#10b981" radius={[4, 4, 0, 0]} />
+              <Line yAxisId="right" type="monotone" dataKey="pass_rate" name="通过率 %" stroke="#ef4444" strokeWidth={2} dot />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
+        <div className="mb-3">
+          <div className="text-sm font-medium text-foreground">Prompt 有效产出</div>
+          <div className="mt-1 text-xs text-muted-foreground">左轴为每个 Prompt 平均有效因子数，右轴为该来源占全部有效因子的比例。</div>
+        </div>
+        <div className="h-[280px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={bySource}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="source" tickFormatter={sourceLabel} tick={{ fontSize: 11 }} />
+              <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} tickFormatter={(value) => `${value}%`} />
+              <Tooltip formatter={(value: any) => formatMetric(value)} labelFormatter={(label) => sourceLabel(String(label))} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="left" dataKey="valid_per_prompt" name="有效因子 / Prompt" fill="#0ea5e9" radius={[4, 4, 0, 0]} />
+              <Line yAxisId="right" type="monotone" dataKey="valid_share" name="有效因子占比 %" stroke="#7c3aed" strokeWidth={2} dot />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-border/50 bg-white/90 p-4 xl:col-span-2">
+        <div className="mb-3">
+          <div className="text-sm font-medium text-foreground">通过率随研究记录变化</div>
+          <div className="mt-1 text-xs text-muted-foreground">每条线表示该来源累计通过率，横轴为因子记录序号。</div>
+        </div>
+        <div className="h-[240px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={timeline}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => `${value}%`} />
+              <Tooltip formatter={(value: any) => `${formatMetric(value)}%`} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {(['arxiv', 'llm', 'future'] as const).map((source) => (
+                <Line key={source} type="monotone" dataKey={`${source}_pass_rate`} name={`${sourceLabel(source)} 通过率`} stroke={sourceColors[source]} strokeWidth={2} dot={false} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void }) => {
   const [report, setReport] = useState<ResearchReport | null>(null);
@@ -691,6 +794,10 @@ export const AutoAlphaRecordsPage: React.FC = () => {
             <div className="mt-2 text-lg font-semibold">{formatDateTime(knowledge?.updated_at)}</div>
           </div>
         </div>
+      </Panel>
+
+      <Panel title="灵感源转化分析" subtitle="按 ArXiv、LLM 和 Future Markdown 追踪灵感次数、passing 因子数、通过率与有效因子贡献。">
+        <InspirationStatsCharts stats={knowledge?.inspiration_stats} />
       </Panel>
 
       <Panel title="进化 Generation 记录">

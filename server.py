@@ -30,6 +30,7 @@ from autoalpha_v2.inspiration_db import (
     compose_inspiration_context,
     delete_inspiration,
     list_inspirations_paginated,
+    list_inspiration_source_counts,
     list_recent_inspirations,
     prepare_inspiration,
     save_inspiration,
@@ -1095,6 +1096,63 @@ def _build_autoalpha_generation_summary(all_factors: List[Dict[str, Any]]) -> Li
     return [buckets[key] for key in sorted(buckets.keys())]
 
 
+def _build_autoalpha_inspiration_stats(all_factors: List[Dict[str, Any]]) -> Dict[str, Any]:
+    tracked_sources = ["arxiv", "llm", "future"]
+    source_counts = {source: 0 for source in tracked_sources}
+    try:
+        for row in list_inspiration_source_counts():
+            source_type = str(row.get("source_type") or "manual")
+            if source_type in source_counts:
+                source_counts[source_type] += _safe_int(row.get("count", 0))
+    except Exception:
+        pass
+
+    tested = {source: 0 for source in tracked_sources}
+    passing = {source: 0 for source in tracked_sources}
+    ordered = sorted(all_factors, key=lambda item: item.get("created_at", ""))
+    timeline_counts = {source: {"tested": 0, "passing": 0} for source in tracked_sources}
+    timeline: List[Dict[str, Any]] = []
+    for idx, factor in enumerate(ordered, start=1):
+        source_type = str(factor.get("inspiration_source_type") or "none")
+        if source_type not in tested:
+            continue
+        tested[source_type] += 1
+        timeline_counts[source_type]["tested"] += 1
+        if factor.get("PassGates"):
+            passing[source_type] += 1
+            timeline_counts[source_type]["passing"] += 1
+        point = {"index": idx, "label": f"#{idx}"}
+        for source in tracked_sources:
+            t = timeline_counts[source]["tested"]
+            p = timeline_counts[source]["passing"]
+            point[f"{source}_tested"] = t
+            point[f"{source}_passing"] = p
+            point[f"{source}_pass_rate"] = round((p / max(t, 1)) * 100, 2)
+        timeline.append(point)
+
+    total_passing = sum(passing.values()) or sum(1 for factor in all_factors if factor.get("PassGates"))
+    by_source = []
+    for source in tracked_sources:
+        prompt_count = source_counts[source]
+        passing_count = passing[source]
+        tested_count = tested[source]
+        by_source.append({
+            "source": source,
+            "prompt_count": prompt_count,
+            "tested_count": tested_count,
+            "passing_count": passing_count,
+            "pass_rate": round((passing_count / max(tested_count, 1)) * 100, 2),
+            "valid_per_prompt": round(passing_count / max(prompt_count, 1), 4),
+            "valid_share": round((passing_count / max(total_passing, 1)) * 100, 2),
+        })
+
+    return {
+        "by_source": by_source,
+        "timeline": _compress_points(timeline, max_points=48),
+        "total_passing_attributed": total_passing,
+    }
+
+
 def _fetch_billing_payload(kind: str, headers: Dict[str, str]) -> tuple[Dict[str, Any], str, str]:
     import requests as rq
 
@@ -1175,6 +1233,7 @@ def autoalpha_knowledge():
         "status_breakdown": status_breakdown,
         "progress_points": _build_autoalpha_progress_points(all_factors),
         "generation_summary": _build_autoalpha_generation_summary(all_factors),
+        "inspiration_stats": _build_autoalpha_inspiration_stats(all_factors),
         "artifacts": {
             "output_files": _list_autoalpha_output_files(),
             "research_reports": _list_autoalpha_research_reports(),
@@ -1426,7 +1485,7 @@ def autoalpha_fetch_inspirations():
             },
             message=(
                 f"抓取完成：ArXiv {added.get('arxiv', 0)}，URL {added.get('url', 0)}，"
-                f"LLM {added.get('llm', 0)}，重复 {added.get('skipped', 0)}"
+                f"LLM {added.get('llm', 0)}，期货 {added.get('future', 0)}，重复 {added.get('skipped', 0)}"
             ),
         )
     except Exception as exc:
