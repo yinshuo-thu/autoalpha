@@ -105,9 +105,15 @@ def _pid_is_running(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    try:
+        stat = subprocess.check_output(["ps", "-o", "stat=", "-p", str(pid)], text=True).strip()
+        if not stat or "Z" in stat:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def _read_autoalpha_loop_meta() -> Dict[str, Any]:
@@ -130,6 +136,12 @@ def _tracked_autoalpha_loop_pid() -> Optional[int]:
             return pid
     except Exception:
         pass
+    for path in (AUTOALPHA_LOOP_PID_PATH, AUTOALPHA_LOOP_META_PATH):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
     return None
 
 
