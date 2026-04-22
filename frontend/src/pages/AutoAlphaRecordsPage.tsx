@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { BarChart2, FileStack, GitBranch } from 'lucide-react';
+import { BarChart2, FileStack, FileText, GitBranch } from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -73,6 +73,7 @@ interface KnowledgePayload {
     timeline: Array<Record<string, any>>;
     total_passing_attributed: number;
   };
+  generation_experiences?: GenerationExperience[];
   factors: KbFactor[];
   artifacts: {
     output_files: AutoAlphaFile[];
@@ -83,6 +84,21 @@ interface KnowledgePayload {
       modified_at: string;
       size_bytes: number;
     }>;
+  };
+}
+
+interface GenerationExperience {
+  generation: number;
+  created_at: string;
+  path: string;
+  relative_path: string;
+  summary: string;
+  markdown?: string;
+  stats?: {
+    total: number;
+    passing: number;
+    best_score: number;
+    failure_counts: Record<string, number>;
   };
 }
 
@@ -694,6 +710,8 @@ export const AutoAlphaRecordsPage: React.FC = () => {
   const [liveResultText, setLiveResultText] = useState('');
   const [liveResultError, setLiveResultError] = useState('');
   const [liveResultSaving, setLiveResultSaving] = useState(false);
+  const [generationNote, setGenerationNote] = useState<GenerationExperience | null>(null);
+  const [generationNoteLoading, setGenerationNoteLoading] = useState<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -716,6 +734,11 @@ export const AutoAlphaRecordsPage: React.FC = () => {
   const factors = knowledge?.factors ?? [];
   const outputFiles = knowledge?.artifacts.output_files ?? [];
   const researchReports = knowledge?.artifacts.research_reports ?? [];
+  const generationExperienceMap = useMemo(() => {
+    const map = new Map<number, GenerationExperience>();
+    (knowledge?.generation_experiences || []).forEach((item) => map.set(Number(item.generation), item));
+    return map;
+  }, [knowledge?.generation_experiences]);
   const maxScore = Math.max(...factors.map((factor) => factor.Score), 1);
   const lineageLanes = useMemo(
     () =>
@@ -734,6 +757,24 @@ export const AutoAlphaRecordsPage: React.FC = () => {
         })),
     [factors]
   );
+
+  const handleOpenGenerationNote = async (generation: number, createIfMissing = false) => {
+    try {
+      setGenerationNoteLoading(generation);
+      const note = await fetchJson<GenerationExperience>(`/api/autoalpha/generation-experience/${generation}`, {
+        method: createIfMissing ? 'POST' : 'GET',
+      });
+      setGenerationNote(note);
+    } catch (error: any) {
+      if (!createIfMissing) {
+        await handleOpenGenerationNote(generation, true);
+        return;
+      }
+      alert(error.message || '无法生成 Generation 经验总结');
+    } finally {
+      setGenerationNoteLoading(null);
+    }
+  };
 
   const openLiveResultModal = (factor: KbFactor) => {
     setLiveResultFactor(factor);
@@ -809,9 +850,20 @@ export const AutoAlphaRecordsPage: React.FC = () => {
               lineageLanes.map((lane, index) => (
                 <div key={lane.generation} className="flex items-start gap-4">
                   <div className="w-[280px]">
-                    <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                      <GitBranch className="h-4 w-4 text-emerald-500" />
-                      Generation {lane.generation}
+                    <div className="mb-3 flex items-center justify-between gap-2 text-sm font-medium text-foreground">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <GitBranch className="h-4 w-4 shrink-0 text-emerald-500" />
+                        <span className="truncate">Generation {lane.generation}</span>
+                      </div>
+                      <button
+                        onClick={() => handleOpenGenerationNote(lane.generation, !generationExperienceMap.has(lane.generation))}
+                        disabled={generationNoteLoading === lane.generation}
+                        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2 text-[11px] font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:opacity-50"
+                        title={generationExperienceMap.has(lane.generation) ? '查看 Generation 经验总结' : '生成并查看 Generation 经验总结'}
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        {generationNoteLoading === lane.generation ? '生成中' : '经验'}
+                      </button>
                     </div>
                     <div className="space-y-3">
                       {lane.factors.map((factor) => (
@@ -1049,6 +1101,46 @@ export const AutoAlphaRecordsPage: React.FC = () => {
       </Panel>
 
       {selectedRunId ? <ResearchModal runId={selectedRunId} onClose={() => setSelectedRunId(null)} /> : null}
+      {generationNote ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div className="max-h-[88vh] w-full max-w-4xl overflow-hidden rounded-3xl border border-border/70 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border/60 px-5 py-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                  <FileText className="h-4 w-4 text-sky-500" />
+                  Generation Experience
+                </div>
+                <div className="mt-2 text-xl font-semibold text-foreground">Generation {generationNote.generation}</div>
+                <div className="mt-1 break-all text-xs text-muted-foreground">{generationNote.relative_path}</div>
+              </div>
+              <button onClick={() => setGenerationNote(null)} className="rounded-full border border-border/60 px-3 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground">
+                关闭
+              </button>
+            </div>
+            <div className="max-h-[72vh] overflow-y-auto p-5">
+              {generationNote.stats ? (
+                <div className="mb-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl bg-slate-50 p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">测试数</div>
+                    <div className="mt-1 text-lg font-semibold">{generationNote.stats.total}</div>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">通过数</div>
+                    <div className="mt-1 text-lg font-semibold">{generationNote.stats.passing}</div>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">Best Score</div>
+                    <div className="mt-1 text-lg font-semibold">{formatNumber(generationNote.stats.best_score, 2)}</div>
+                  </div>
+                </div>
+              ) : null}
+              <pre className="whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-5 font-mono text-xs leading-6 text-slate-100">
+                {generationNote.markdown || generationNote.summary || '暂无总结内容。'}
+              </pre>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {liveResultFactor ? (
         <LiveResultModal
           factor={liveResultFactor}

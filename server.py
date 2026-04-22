@@ -1287,12 +1287,37 @@ def autoalpha_knowledge():
         "status_breakdown": status_breakdown,
         "progress_points": _build_autoalpha_progress_points(all_factors),
         "generation_summary": _build_autoalpha_generation_summary(all_factors),
+        "generation_experiences": list(kb.get("generation_experiences", {}).values()),
         "inspiration_stats": _build_autoalpha_inspiration_stats(all_factors),
         "artifacts": {
             "output_files": _list_autoalpha_output_files(),
             "research_reports": _list_autoalpha_research_reports(),
         },
     })
+
+
+@app.route("/api/autoalpha/generation-experience/<int:generation>", methods=["GET", "POST"])
+def autoalpha_generation_experience(generation: int):
+    try:
+        from autoalpha_v2 import knowledge_base as kb
+
+        if request.method == "POST":
+            from autoalpha_v2.llm_client import summarize_generation_experience
+
+            payload = kb.build_generation_experience_payload(generation)
+            if payload.get("total", 0) <= 0:
+                return fail("该 Generation 暂无实验数据", 404)
+            previous_context = kb.compose_recent_generation_experience_context(limit=3)
+            markdown = summarize_generation_experience(payload, previous_context=previous_context)
+            record = kb.save_generation_experience(generation, markdown, payload)
+            return ok({**record, "markdown": markdown}, message="Generation 经验总结已生成")
+
+        record = kb.get_generation_experience(generation)
+        if not record:
+            return fail("该 Generation 暂无经验总结，请先生成或等待本轮结束", 404)
+        return ok(record)
+    except Exception as exc:
+        return fail(str(exc), 500)
 
 
 @app.route("/api/autoalpha/factors/<run_id>/live-result", methods=["POST"])

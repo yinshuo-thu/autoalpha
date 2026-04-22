@@ -29,6 +29,7 @@ from autoalpha_v2.error_utils import AutoAlphaRuntimeError, humanize_error
 from autoalpha_v2.pipeline import run
 from autoalpha_v2.idea_cache import get_default_cache
 from autoalpha_v2.inspiration_fetcher import start_background_fetcher
+from autoalpha_v2.llm_client import summarize_generation_experience
 from core.feishu_bot import FeishuNotifier
 from runtime_config import load_runtime_config
 
@@ -176,6 +177,27 @@ def mining_loop(
                 kb.add_factor(result, parent_run_ids=parent_run_ids)
             except Exception as e:
                 _log(f"[WARN] Failed to save factor to KB: {e}")
+
+        # Write a generation-level research memory note after the new results land.
+        touched_generations: set[int] = set()
+        for result in results:
+            try:
+                saved = kb.get_factor(result.get("run_id", ""))
+                if saved:
+                    touched_generations.add(int(saved.get("generation", 0) or 0))
+            except Exception:
+                pass
+        for generation in sorted(touched_generations):
+            try:
+                payload = kb.build_generation_experience_payload(generation)
+                if payload.get("total", 0) <= 0:
+                    continue
+                previous_context = kb.compose_recent_generation_experience_context(limit=3)
+                markdown = summarize_generation_experience(payload, previous_context=previous_context)
+                record = kb.save_generation_experience(generation, markdown, payload)
+                _log(f"[experience] Generation {generation} summary saved → {record.get('relative_path')}")
+            except Exception as exc:
+                _log(f"[WARN] Generation experience summary failed for gen {generation}: {exc}")
 
         # Round summary
         passing = [r for r in results if r.get("PassGates")]

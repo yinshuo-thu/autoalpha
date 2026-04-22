@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 KB_PATH = Path(__file__).resolve().parent / "knowledge.json"
 SUBMIT_DIR = Path(__file__).resolve().parent / "submit"
+GENERATION_NOTES_DIR = Path(__file__).resolve().parent / "generation_notes"
 
 _EMPTY_KB: Dict[str, Any] = {
     "version": 2,
@@ -39,6 +40,7 @@ _EMPTY_KB: Dict[str, Any] = {
         "family_records": {},   # fingerprint → {attempts, wins, avg_score, example}
         "productive_ops": {},   # single op → {attempts, wins}
     },
+    "generation_experiences": {},
 }
 
 _MOTIF_TOKENS = [
@@ -109,6 +111,8 @@ def _load() -> Dict[str, Any]:
             # Back-fill skill_memory section for older KB files
             if "skill_memory" not in kb:
                 kb["skill_memory"] = _EMPTY_KB["skill_memory"].copy()
+            if "generation_experiences" not in kb:
+                kb["generation_experiences"] = {}
             return kb
         except Exception:
             pass
@@ -313,6 +317,152 @@ def sync_submit_artifacts() -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Generation experience notes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _failure_reason(item: Dict[str, Any]) -> str:
+    if item.get("PassGates"):
+        return "passed"
+    status = item.get("status", "")
+    if status == "invalid":
+        return "invalid_formula"
+    if status == "compute_error":
+        return "compute_error"
+    if status == "duplicate":
+        return "duplicate_formula"
+    if status == "screened_out":
+        return "screened_out"
+    if float(item.get("tvr", 0) or 0) >= 330:
+        return "high_tvr"
+    if float(item.get("IR", 0) or 0) <= 2.5:
+        return "low_ir"
+    if float(item.get("IC", 0) or 0) <= 0.6:
+        return "low_ic"
+    if float(item.get("Score", 0) or 0) <= 0:
+        return "zero_score"
+    return "failed_gate"
+
+
+def build_generation_experience_payload(generation: int) -> Dict[str, Any]:
+    kb = _load()
+    factors = [
+        {"run_id": rid, **info}
+        for rid, info in kb.get("factors", {}).items()
+        if int(info.get("generation", 0) or 0) == int(generation)
+    ]
+    factors.sort(key=lambda item: item.get("created_at", ""))
+    reason_counts = Counter(_failure_reason(item) for item in factors)
+    top = sorted(factors, key=lambda item: (item.get("Score", 0), item.get("IC", 0)), reverse=True)[:6]
+    weak = sorted(factors, key=lambda item: (item.get("PassGates", False), item.get("Score", 0), item.get("IC", 0)))[:8]
+    return {
+        "generation": int(generation),
+        "created_at": datetime.now().isoformat(),
+        "total": len(factors),
+        "passing": sum(1 for item in factors if item.get("PassGates")),
+        "best_score": max((float(item.get("Score", 0) or 0) for item in factors), default=0.0),
+        "failure_counts": dict(reason_counts),
+        "top_examples": [
+            {
+                "run_id": item.get("run_id", ""),
+                "formula": item.get("formula", ""),
+                "thought_process": item.get("thought_process", ""),
+                "IC": float(item.get("IC", 0) or 0),
+                "IR": float(item.get("IR", 0) or 0),
+                "tvr": float(item.get("tvr", 0) or 0),
+                "Score": float(item.get("Score", 0) or 0),
+                "PassGates": bool(item.get("PassGates")),
+                "status": item.get("status", ""),
+                "failure_reason": _failure_reason(item),
+                "motif": formula_motif(item.get("formula", "")),
+            }
+            for item in top
+        ],
+        "weak_examples": [
+            {
+                "run_id": item.get("run_id", ""),
+                "formula": item.get("formula", ""),
+                "IC": float(item.get("IC", 0) or 0),
+                "IR": float(item.get("IR", 0) or 0),
+                "tvr": float(item.get("tvr", 0) or 0),
+                "Score": float(item.get("Score", 0) or 0),
+                "PassGates": bool(item.get("PassGates")),
+                "status": item.get("status", ""),
+                "failure_reason": _failure_reason(item),
+                "motif": formula_motif(item.get("formula", "")),
+            }
+            for item in weak
+        ],
+    }
+
+
+def save_generation_experience(generation: int, markdown: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    generation = int(generation)
+    GENERATION_NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    note_path = GENERATION_NOTES_DIR / f"generation_{generation:03d}.md"
+    note_path.write_text(markdown.strip() + "\n", encoding="utf-8")
+
+    kb = _load()
+    record = {
+        "generation": generation,
+        "created_at": datetime.now().isoformat(),
+        "path": str(note_path),
+        "relative_path": str(note_path.relative_to(Path(__file__).resolve().parents[1])),
+        "summary": _markdown_summary(markdown),
+        "stats": {
+            "total": payload.get("total", 0),
+            "passing": payload.get("passing", 0),
+            "best_score": payload.get("best_score", 0.0),
+            "failure_counts": payload.get("failure_counts", {}),
+        },
+    }
+    kb.setdefault("generation_experiences", {})[str(generation)] = record
+    _save(kb)
+    return record
+
+
+def _markdown_summary(markdown: str, limit: int = 220) -> str:
+    text = re.sub(r"`+", "", markdown or "")
+    text = re.sub(r"#+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def get_generation_experience(generation: int) -> Optional[Dict[str, Any]]:
+    kb = _load()
+    record = kb.get("generation_experiences", {}).get(str(int(generation)))
+    if not record:
+        return None
+    markdown = ""
+    path = record.get("path")
+    if path and Path(str(path)).is_file():
+        markdown = Path(str(path)).read_text(encoding="utf-8")
+    return {**record, "markdown": markdown}
+
+
+def list_generation_experiences() -> List[Dict[str, Any]]:
+    kb = _load()
+    records = list(kb.get("generation_experiences", {}).values())
+    records.sort(key=lambda item: int(item.get("generation", 0) or 0))
+    return records
+
+
+def compose_recent_generation_experience_context(limit: int = 3, max_chars: int = 2200) -> str:
+    records = list_generation_experiences()[-max(1, limit):]
+    lines: List[str] = []
+    for record in records:
+        stats = record.get("stats", {})
+        failures = stats.get("failure_counts", {})
+        failure_text = ", ".join(f"{k}={v}" for k, v in failures.items()) or "none"
+        lines.append(
+            f"- Generation {record.get('generation')}: tested={stats.get('total', 0)}, "
+            f"passing={stats.get('passing', 0)}, best_score={float(stats.get('best_score', 0) or 0):.2f}, "
+            f"failures=({failure_text}). Notes: {record.get('summary', '')}"
+        )
+    text = "\n".join(lines)
+    return text[:max_chars]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Formula utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -434,6 +584,7 @@ def get_generation_guidance(
         ],
         # Hubble: exhausted structural families
         "exhausted_families": exhausted_families,
+        "generation_experience_context": compose_recent_generation_experience_context(),
     }
 
 

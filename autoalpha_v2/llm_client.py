@@ -287,6 +287,43 @@ def summarize_inspiration_text(text: str, source_hint: str = "") -> str:
         return fallback[:180]
 
 
+def summarize_generation_experience(payload: dict[str, Any], previous_context: str = "") -> str:
+    """Ask the LLM to write a generation-level research note for memory reuse."""
+    compact = json.dumps(payload, ensure_ascii=False, indent=2)[:9000]
+    prompt = (
+        "请作为量化研究负责人，总结下面这个 AutoAlpha Generation 的完整实验经验。"
+        "目标是形成后续 LLM 生成因子的上文，而不是普通日报。\n\n"
+        "必须覆盖：\n"
+        "1. 本代总体表现：测试数、通过数、best score、主要失败模式。\n"
+        "2. 可复用的正向经验：哪些市场机制、字段组合、平滑/归一化方式值得继续。\n"
+        "3. 明确的负向经验：例如 TVR 过高、IR 不稳、IC 方向差、重复结构、DSL 语法问题分别如何避免。\n"
+        "4. 下一代探索启示：给出 5-8 条具体可执行的生成约束或方向。\n"
+        "5. 写给下一代 Prompt 的短指令：控制在 120 中文字内。\n\n"
+        "输出 Markdown，使用清晰小标题。不要编造不存在的通过因子；如果没有通过因子，要直说。"
+    )
+    if previous_context:
+        prompt += f"\n\n最近几代经验摘要，可用于判断趋势：\n{previous_context[:2400]}"
+    prompt += f"\n\n本代结构化实验数据：\n{compact}"
+    try:
+        text = _request_text([{"role": "user", "content": prompt}], max_tokens=1200, tier="reasoning")
+        return text.strip()
+    except Exception as exc:
+        failures = payload.get("failure_counts", {})
+        failure_text = ", ".join(f"{k}={v}" for k, v in failures.items()) or "none"
+        return (
+            f"# Generation {payload.get('generation')} Experience\n\n"
+            f"- Tested: {payload.get('total', 0)}\n"
+            f"- Passing: {payload.get('passing', 0)}\n"
+            f"- Best Score: {float(payload.get('best_score', 0) or 0):.2f}\n"
+            f"- Failure Pattern: {failure_text}\n\n"
+            "## 后续启示\n"
+            "- 优先降低换手：增加 `ts_decay_linear` / `ts_mean` 平滑，避免直接追逐 1-3 bar 的成交量尖峰。\n"
+            "- 避免重复近期失败的 operator skeleton，尝试更稳健的 median/quantile baseline。\n"
+            "- 继续保持公式紧凑，先解决 IC/IR/TVR 的门槛，再扩展复杂结构。\n\n"
+            f"_LLM summary fallback because: {exc}_"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Context formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -502,6 +539,15 @@ def generate_idea(
     )
     if strong_examples:
         sections.append(strong_examples)
+
+    generation_experience = guidance.get("generation_experience_context") or ""
+    if generation_experience:
+        sections.append(
+            "Generation-level research experience from previous rounds. Treat this as hard-earned lab memory; "
+            "especially obey repeated failure lessons such as high turnover, unstable IR, duplicate structures, "
+            "and DSL syntax pitfalls:\n"
+            f"{generation_experience}"
+        )
 
     sections.append(
         f"This is idea {idea_index + 1} of {total_ideas}. "
