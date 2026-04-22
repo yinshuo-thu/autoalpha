@@ -42,6 +42,17 @@ interface KbFactor {
 
 interface LoopStatus {
   is_running: boolean;
+  pid?: number | null;
+  run_state?: {
+    started_at?: string;
+    params?: {
+      rounds?: number;
+      ideas?: number;
+      days?: number;
+      target_valid?: number;
+      run_model_lab?: boolean;
+    };
+  };
   total_tested: number;
   total_passing: number;
   best_score: number;
@@ -504,6 +515,7 @@ export const AutoAlphaPage: React.FC = () => {
   const [rounds, setRounds] = useState(10);
   const [ideas, setIdeas] = useState(3);
   const [days, setDays] = useState(0);
+  const [targetValid, setTargetValid] = useState(100);
   const [promptTitle, setPromptTitle] = useState('');
   const [promptInput, setPromptInput] = useState('');
   const [promptBusy, setPromptBusy] = useState(false);
@@ -538,9 +550,10 @@ export const AutoAlphaPage: React.FC = () => {
     fetchJson<RuntimeConfigPayload>('/api/system/config')
       .then((cfg) => {
         const env = cfg.env || {};
-        setRounds(Number(env.AUTOALPHA_DEFAULT_ROUNDS || 10));
-        setIdeas(Number(env.AUTOALPHA_DEFAULT_IDEAS || 3));
+        setRounds(Number(env.AUTOALPHA_DEFAULT_ROUNDS || 0));
+        setIdeas(Number(env.AUTOALPHA_DEFAULT_IDEAS || 4));
         setDays(Number(env.AUTOALPHA_DEFAULT_DAYS || 0));
+        setTargetValid(Number(env.AUTOALPHA_DEFAULT_TARGET_VALID || 100));
       })
       .catch(() => {});
 
@@ -595,7 +608,7 @@ export const AutoAlphaPage: React.FC = () => {
       setPageMessage('');
       await fetchJson('/api/autoalpha/loop/start', {
         method: 'POST',
-        body: JSON.stringify({ rounds, ideas, days }),
+        body: JSON.stringify({ rounds, ideas, days, target_valid: targetValid }),
       });
       const nextStatus = await fetchJson<LoopStatus>('/api/autoalpha/loop/status');
       setStatus(nextStatus);
@@ -954,11 +967,12 @@ export const AutoAlphaPage: React.FC = () => {
           </div>
         </Panel>
 
-        <Panel title="循环控制与实时日志" subtitle="直接启动全量数据挖掘；days=0 会使用全部交易日，飞书报错会同步成可理解的额度、认证和超时信息。">
-          <div className="grid min-w-0 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <Panel title="循环控制与实时日志" subtitle="直接启动全量数据挖掘；rounds=0 表示持续运行，直到达到目标有效因子数或手动停止。">
+          <div className="grid min-w-0 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
               <div className="text-xs text-muted-foreground">轮数 rounds</div>
-              <input type="number" min={1} max={200} value={rounds} onChange={(event) => setRounds(Number(event.target.value))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <input type="number" min={0} max={2000} value={rounds} onChange={(event) => setRounds(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <div className="mt-2 text-[11px] text-muted-foreground">0 表示长跑模式</div>
             </label>
             <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
               <div className="text-xs text-muted-foreground">每轮 ideas</div>
@@ -968,6 +982,11 @@ export const AutoAlphaPage: React.FC = () => {
               <div className="text-xs text-muted-foreground">交易日 days</div>
               <input type="number" min={0} value={days} onChange={(event) => setDays(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
               <div className="mt-2 text-[11px] text-muted-foreground">输入 0 即使用全量数据</div>
+            </label>
+            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
+              <div className="text-xs text-muted-foreground">目标有效因子</div>
+              <input type="number" min={0} max={1000} value={targetValid} onChange={(event) => setTargetValid(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <div className="mt-2 text-[11px] text-muted-foreground">0 表示不设目标</div>
             </label>
           </div>
 
@@ -981,7 +1000,7 @@ export const AutoAlphaPage: React.FC = () => {
           </div>
 
           <div className="mt-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
-            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper="状态轮询间隔 4 秒" valueClassName="text-xl" />
+            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '状态轮询间隔 4 秒'} valueClassName="text-xl" />
             <StatCard label="云端一致说明" value="TVR / Score 已对齐" helper="submission-like 提交评分链路" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
           </div>
 

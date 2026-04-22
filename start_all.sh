@@ -154,7 +154,7 @@ EOF
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <false/>
+  <true/>
   <key>StandardOutPath</key>
   <string>${stdout_log}</string>
   <key>StandardErrorPath</key>

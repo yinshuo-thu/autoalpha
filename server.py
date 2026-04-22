@@ -64,6 +64,8 @@ _backtest_threads: Dict[str, threading.Thread] = {}
 _backtest_lock = threading.Lock()
 
 AUTOALPHA_LOG_PATH = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "loop.log")
+AUTOALPHA_LOOP_PID_PATH = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "loop.pid")
+AUTOALPHA_LOOP_META_PATH = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "loop_state.json")
 AUTOALPHA_KB_PATH  = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "knowledge.json")
 AUTOALPHA_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "output")
 AUTOALPHA_RESEARCH_DIR = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "research")
@@ -96,6 +98,57 @@ def fail(message: str, status_code: int = 400):
 
 def now_iso() -> str:
     return datetime.now().isoformat()
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _read_autoalpha_loop_meta() -> Dict[str, Any]:
+    try:
+        with open(AUTOALPHA_LOOP_META_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _tracked_autoalpha_loop_pid() -> Optional[int]:
+    global _autoalpha_loop_process
+    if _autoalpha_loop_process is not None and _autoalpha_loop_process.poll() is None:
+        return int(_autoalpha_loop_process.pid)
+    try:
+        with open(AUTOALPHA_LOOP_PID_PATH, "r", encoding="utf-8") as handle:
+            pid = int((handle.read() or "0").strip())
+        if _pid_is_running(pid):
+            return pid
+    except Exception:
+        pass
+    return None
+
+
+def _write_autoalpha_loop_state(pid: int, params: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(AUTOALPHA_LOOP_PID_PATH), exist_ok=True)
+    with open(AUTOALPHA_LOOP_PID_PATH, "w", encoding="utf-8") as handle:
+        handle.write(str(pid))
+    with open(AUTOALPHA_LOOP_META_PATH, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "pid": pid,
+                "started_at": now_iso(),
+                "params": params,
+                "log_path": AUTOALPHA_LOG_PATH,
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
 
 
 def get_data_hub():
@@ -247,6 +300,7 @@ def load_runtime_env_payload() -> Dict[str, Any]:
             "AUTOALPHA_DEFAULT_ROUNDS": raw.get("AUTOALPHA_DEFAULT_ROUNDS", ""),
             "AUTOALPHA_DEFAULT_IDEAS": raw.get("AUTOALPHA_DEFAULT_IDEAS", ""),
             "AUTOALPHA_DEFAULT_DAYS": raw.get("AUTOALPHA_DEFAULT_DAYS", ""),
+            "AUTOALPHA_DEFAULT_TARGET_VALID": raw.get("AUTOALPHA_DEFAULT_TARGET_VALID", ""),
             "AUTOALPHA_PROMPT_CONTEXT_LIMIT": raw.get("AUTOALPHA_PROMPT_CONTEXT_LIMIT", ""),
             "AUTOALPHA_QUOTA_DISPLAY_FX": raw.get("AUTOALPHA_QUOTA_DISPLAY_FX", ""),
             "AUTOALPHA_ROLLING_TARGET_VALID": raw.get("AUTOALPHA_ROLLING_TARGET_VALID", ""),
@@ -1529,21 +1583,32 @@ def autoalpha_idea_cache_status():
 @app.route("/api/autoalpha/loop/start", methods=["POST"])
 def autoalpha_loop_start():
     global _autoalpha_loop_process
-    if _autoalpha_loop_process is not None and _autoalpha_loop_process.poll() is None:
+    running_pid = _tracked_autoalpha_loop_pid()
+    if running_pid is not None:
         return ok({"status": "already_running"}, message="挖掘循环已在运行")
 
     data = request.get_json(silent=True) or {}
-    rounds = int(data.get("rounds", 5))
-    ideas  = int(data.get("ideas", 3))
-    days   = int(data.get("days", 0))
-    target_valid = int(data.get("target_valid", 0))
+    cfg = load_runtime_config()
+    rounds = int(data.get("rounds", cfg.get("AUTOALPHA_DEFAULT_ROUNDS", 0) or 0))
+    ideas  = int(data.get("ideas", cfg.get("AUTOALPHA_DEFAULT_IDEAS", 4) or 4))
+    days   = int(data.get("days", cfg.get("AUTOALPHA_DEFAULT_DAYS", 0) or 0))
+    target_valid = int(data.get("target_valid", cfg.get("AUTOALPHA_DEFAULT_TARGET_VALID", 100) or 100))
     run_model_lab = bool(data.get("run_model_lab", False))
+    rounds = max(0, rounds)
+    ideas = max(1, min(ideas, 20))
     if days < 0:
         days = 0
 
     loop_script = os.path.join(os.path.dirname(__file__), "autoalpha_v2", "loop.py")
     os.makedirs(os.path.dirname(AUTOALPHA_LOG_PATH), exist_ok=True)
     log_file = open(AUTOALPHA_LOG_PATH, "w", encoding="utf-8")
+    params = {
+        "rounds": rounds,
+        "ideas": ideas,
+        "days": days,
+        "target_valid": target_valid,
+        "run_model_lab": run_model_lab,
+    }
     log_file.write(
         f"[{now_iso()}] Loop started (rounds={rounds} ideas={ideas} days={days} target_valid={target_valid} run_model_lab={run_model_lab})\n"
     )
@@ -1559,9 +1624,12 @@ def autoalpha_loop_start():
         cwd=os.path.dirname(__file__),
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
+    _write_autoalpha_loop_state(int(_autoalpha_loop_process.pid), params)
     return ok({
         "status": "started",
+        "pid": int(_autoalpha_loop_process.pid),
         "rounds": rounds,
         "ideas": ideas,
         "days": days,
@@ -1577,17 +1645,24 @@ def autoalpha_loop_start():
 @app.route("/api/autoalpha/loop/stop", methods=["POST"])
 def autoalpha_loop_stop():
     global _autoalpha_loop_process
-    if _autoalpha_loop_process is not None and _autoalpha_loop_process.poll() is None:
-        _autoalpha_loop_process.terminate()
-        _autoalpha_loop_process = None
-        return ok({"status": "stopped"}, message="挖掘循环已停止")
+    pid = _tracked_autoalpha_loop_pid()
+    if pid is not None:
+        try:
+            if _autoalpha_loop_process is not None and _autoalpha_loop_process.poll() is None:
+                _autoalpha_loop_process.terminate()
+            else:
+                os.kill(pid, 15)
+        finally:
+            _autoalpha_loop_process = None
+        return ok({"status": "stopped", "pid": pid}, message="挖掘循环已停止")
     return ok({"status": "not_running"}, message="当前没有运行中的挖掘循环")
 
 
 @app.route("/api/autoalpha/loop/status", methods=["GET"])
 def autoalpha_loop_status():
     global _autoalpha_loop_process
-    is_running = _autoalpha_loop_process is not None and _autoalpha_loop_process.poll() is None
+    running_pid = _tracked_autoalpha_loop_pid()
+    is_running = running_pid is not None
 
     # Read recent log lines
     logs: List[str] = []
@@ -1606,6 +1681,8 @@ def autoalpha_loop_status():
     kb = _load_autoalpha_kb()
     return ok({
         "is_running": is_running,
+        "pid": running_pid,
+        "run_state": _read_autoalpha_loop_meta(),
         "total_tested": kb.get("total_tested", 0),
         "total_passing": kb.get("total_passing", 0),
         "best_score": kb.get("best_score", 0),

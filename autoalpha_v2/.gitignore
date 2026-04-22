@@ -2,8 +2,10 @@ __pycache__/
 *.py[cod]
 *.db
 *.log
+*.pid
 
 knowledge.json
+loop_state.json
 knowledge_backup_*.json
 
 output/
