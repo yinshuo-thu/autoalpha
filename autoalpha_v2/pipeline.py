@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from autoalpha_v2 import factor_research
 from autoalpha_v2 import knowledge_base as kb
 from autoalpha_v2.error_utils import AutoAlphaRuntimeError, humanize_error
+from autoalpha_v2.inspiration_db import record_pass as record_inspiration_pass, record_usage as record_inspiration_usage
 from autoalpha_v2.llm_client import generate_idea
 from core.evaluator import evaluate_submission_like_wide
 from core.feishu_bot import FeishuNotifier
@@ -317,6 +318,47 @@ def _evaluate_with_optional_flip(
     return alpha, formula, metrics
 
 
+def _screen_failure_details(
+    metrics: dict[str, Any],
+    cfg: dict[str, str],
+    expected_days: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return structured details explaining exactly which screen gates failed."""
+    ic = float(metrics.get("IC", 0) or 0)
+    ir = float(metrics.get("IR", 0) or 0)
+    tvr = float(metrics.get("Turnover", 0) or 0)
+    preview = metrics.get("result_preview") or {}
+    nd = float(preview.get("nd", metrics.get("nd", 0)) or 0)
+    cover_all = preview.get("cover_all", metrics.get("cover_all"))
+    min_ic = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12)
+    min_ir = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 0.6)
+    max_tvr = _cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0)
+    fails: list[dict[str, Any]] = []
+    if ic < min_ic:
+        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": ">=", "message": f"IC={ic:.3f}<{min_ic}"})
+    if ir < min_ir:
+        fails.append({"key": "IR", "value": ir, "threshold": min_ir, "direction": ">=", "message": f"IR={ir:.3f}<{min_ir}"})
+    if tvr > max_tvr:
+        fails.append({"key": "TVR", "value": tvr, "threshold": max_tvr, "direction": "<=", "message": f"TVR={tvr:.0f}>{max_tvr:.0f}"})
+    if expected_days and nd and nd < expected_days:
+        fails.append({"key": "Days", "value": nd, "threshold": expected_days, "direction": ">=", "message": f"Days={nd:.0f}/{expected_days}"})
+    if cover_all is not None and int(bool(cover_all)) == 0:
+        fails.append({"key": "Coverage", "value": cover_all, "threshold": 1, "direction": "=", "message": "Coverage=0"})
+    if not fails and float(metrics.get("Score", 0) or 0) <= 0:
+        fails.append({"key": "Score", "value": float(metrics.get("Score", 0) or 0), "threshold": 0, "direction": ">", "message": "score=0"})
+    return fails
+
+
+def _screen_failure_reason(
+    metrics: dict[str, Any],
+    cfg: dict[str, str],
+    expected_days: int | None = None,
+) -> str:
+    """Return a compact string explaining exactly which screen gates failed."""
+    details = _screen_failure_details(metrics, cfg, expected_days=expected_days)
+    return ", ".join(str(item.get("message", "")) for item in details if item.get("message")) or "screen gate failed"
+
+
 def _should_promote_from_screen(metrics: dict[str, Any], cfg: dict[str, str]) -> bool:
     ic = float(metrics.get("IC", 0) or 0)
     ir = float(metrics.get("IR", 0) or 0)
@@ -455,25 +497,22 @@ def run(
         },
     )
 
-    # ── 2. Generate ideas (parallel with concurrency limit + cache pop) ────────
+    # ── 2. Generate ideas (cache-first, then bounded LLM generation) ───────────
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
     from autoalpha_v2.idea_cache import get_default_cache
 
     idea_cache = get_default_cache()
-    idea_concurrency = _cfg_int(cfg, "AUTOALPHA_IDEA_CONCURRENCY", 3)
+    idea_concurrency = max(1, _cfg_int(cfg, "AUTOALPHA_IDEA_CONCURRENCY", 1))
 
     ideas: list[dict] = []
     generation_errors: list[dict[str, str]] = []
 
     def _fetch_one_idea(i: int) -> tuple[int, Optional[dict], Optional[dict]]:
-        # Try cache first
-        cached = idea_cache.pop()
-        if cached:
-            print(f"\n[pipeline] Idea {i+1}/{n_ideas} from cache: {cached.get('formula','')[:60]}")
-            return i, cached, None
         print(f"\n[pipeline] Generating idea {i+1}/{n_ideas} via LLM …")
         try:
             idea = generate_idea(parents=parents, idea_index=i, total_ideas=n_ideas)
+            if idea and idea.get("formula") and not idea.get("idea_cache_id"):
+                idea["idea_cache_id"] = idea_cache.register_generated_idea(idea, consumed=True)
             return i, idea, None
         except Exception as e:
             friendly, suggestion, _, raw = humanize_error(e)
@@ -487,40 +526,86 @@ def run(
             "inspiration_source_type": source_type,
             "inspiration_source_types": source_types,
             "inspiration_ids": inspiration_ids,
+            "idea_cache_id": idea.get("idea_cache_id"),
+            "archetype": idea.get("archetype", ""),
+            "archetype_label": idea.get("archetype_label", ""),
+            "generation_mode": idea.get("generation_mode", ""),
+            "target_source": idea.get("target_source", source_type),
+            "prompt_version": idea.get("prompt_version", ""),
         }
 
-    with ThreadPoolExecutor(max_workers=idea_concurrency) as pool:
-        futures = {pool.submit(_fetch_one_idea, i): i for i in range(n_ideas)}
-        for fut in _as_completed(futures):
-            i, idea, err = fut.result()
-            if idea:
-                print(f"  formula    : {idea.get('formula')}")
-                print(f"  thought    : {str(idea.get('thought_process',''))[:120]}")
-                ideas.append(idea)
-                _append_trace(
-                    trace_path,
-                    "idea_generated",
-                    {
-                        "idea_index": i + 1,
-                        "formula": idea.get("formula", ""),
-                        "thought_process": idea.get("thought_process", ""),
-                        **_source_fields(idea),
-                    },
-                )
-            elif err:
-                generation_errors.append(err)
-                extra = f" 建议: {err.get('suggestion')}" if err.get("suggestion") else ""
-                print(f"  [WARN] LLM call failed: {err.get('friendly')}{extra}")
-                _append_trace(
-                    trace_path,
-                    "idea_generation_error",
-                    {
-                        "idea_index": i + 1,
-                        "friendly": err.get("friendly", ""),
-                        "suggestion": err.get("suggestion", ""),
-                        "raw": err.get("raw", ""),
-                    },
-                )
+    def _record_idea_outcome(idea: dict[str, Any], outcome: str) -> None:
+        try:
+            idea_cache.record_outcome(idea.get("idea_cache_id"), outcome)
+        except Exception as exc:
+            print(f"  [WARN] Idea outcome writeback failed: {exc}")
+
+    def _append_idea(i: int, idea: dict[str, Any], source_label: str) -> None:
+        print(f"\n[pipeline] Idea {i+1}/{n_ideas} from {source_label}: {idea.get('formula','')[:60]}")
+        print(f"  formula    : {idea.get('formula')}")
+        print(f"  thought    : {str(idea.get('thought_process',''))[:120]}")
+        ideas.append(idea)
+        try:
+            record_inspiration_usage(idea.get("inspiration_ids") or [])
+        except Exception as exc:
+            print(f"  [WARN] Inspiration usage writeback failed: {exc}")
+        _append_trace(
+            trace_path,
+            "idea_generated",
+            {
+                "idea_index": i + 1,
+                "formula": idea.get("formula", ""),
+                "thought_process": idea.get("thought_process", ""),
+                "source": source_label,
+                **_source_fields(idea),
+            },
+        )
+
+    # Drain any ready cache entries first so we do not hit the gateway unnecessarily.
+    while len(ideas) < n_ideas:
+        cached = idea_cache.pop()
+        if not cached:
+            break
+        _append_idea(len(ideas), cached, "cache")
+
+    missing = n_ideas - len(ideas)
+    if missing > 0:
+        idea_cache.join_fill()  # serialise: wait for background fill before inline LLM calls
+        # Fill may have completed while we were waiting — drain cache before going inline.
+        while len(ideas) < n_ideas:
+            cached = idea_cache.pop()
+            if not cached:
+                break
+            _append_idea(len(ideas), cached, "cache-after-fill")
+        missing = n_ideas - len(ideas)
+    if missing > 0:
+        with ThreadPoolExecutor(max_workers=min(idea_concurrency, missing)) as pool:
+            futures = {pool.submit(_fetch_one_idea, i + len(ideas)): i for i in range(missing)}
+            for fut in _as_completed(futures):
+                i, idea, err = fut.result()
+                if idea:
+                    _append_idea(i, idea, "LLM")
+                elif err:
+                    generation_errors.append(err)
+                    extra = f" 建议: {err.get('suggestion')}" if err.get("suggestion") else ""
+                    print(f"  [WARN] LLM call failed: {err.get('friendly')}{extra}")
+                    _append_trace(
+                        trace_path,
+                        "idea_generation_error",
+                        {
+                            "idea_index": i + 1,
+                            "friendly": err.get("friendly", ""),
+                            "suggestion": err.get("suggestion", ""),
+                            "raw": err.get("raw", ""),
+                        },
+                    )
+
+    # Background prefill may have succeeded while foreground generation was failing.
+    while len(ideas) < n_ideas:
+        cached = idea_cache.pop()
+        if not cached:
+            break
+        _append_idea(len(ideas), cached, "cache-retry")
 
     if idea_pause_sec > 0 and ideas:
         time.sleep(idea_pause_sec)
@@ -556,6 +641,7 @@ def run(
         if formula_key in existing_formula_keys or formula_key in batch_formula_keys:
             print("  [SKIP] Duplicate formula against KB or current batch")
             _append_trace(trace_path, "duplicate_formula", {"run_id": run_id, "formula": formula})
+            _record_idea_outcome(idea, "duplicate")
             results.append({
                 "run_id": run_id,
                 "formula": formula,
@@ -576,6 +662,7 @@ def run(
                 "validation_failed",
                 {"run_id": run_id, "formula": formula, "errors": list(vr.errors or [])},
             )
+            _record_idea_outcome(idea, "syntax_error")
             results.append({
                 "run_id": run_id,
                 "formula": formula,
@@ -612,6 +699,7 @@ def run(
                 "screen_compute_error",
                 {"run_id": run_id, "formula": formula, "error": str(e)},
             )
+            _record_idea_outcome(idea, "compute_error")
             results.append({
                 "run_id": run_id,
                 "formula": formula,
@@ -656,49 +744,110 @@ def run(
                 {"run_id": run_id, "formula": formula, "error": str(e)},
             )
 
+        tvr_opt_combo: str = ""   # name of winning TVR optimization combo, used in step 3d
         if not _should_promote_from_screen(screen_metrics, cfg):
-            print("  [screen] Low-signal candidate — skipping full-history evaluation and heavy artifacts")
-            _append_trace(
-                trace_path,
-                "screen_rejected",
-                {"run_id": run_id, "formula": formula, "screen_metrics": screen_metrics},
-            )
-            results.append({
-                "run_id": run_id,
-                "formula": formula,
-                "thought_process": idea.get("thought_process", ""),
-                **_source_fields(idea),
-                "postprocess": postmode,
-                "lookback_days": lookback,
-                "status": "screened_out",
-                "IC": screen_metrics.get("IC", 0),
-                "IR": screen_metrics.get("IR", 0),
-                "tvr": screen_metrics.get("Turnover", 0),
-                "PassGates": False,
-                "Score": screen_metrics.get("Score", 0),
-                "gates_detail": screen_metrics.get("GatesDetail", {}),
-                "parquet_path": None,
-                "eval_days": len(screen_days),
-                "research_path": None,
-                "screening": {
-                    "stage": "recent_subset",
-                    "days": len(screen_days),
-                    "promoted": False,
-                },
-                "artifact_policy": "skipped_low_signal",
-            })
-            gc.collect()
-            continue
+            # 3c-opt. TVR rescue: if IC is promising but TVR is too high, try smoothing combos
+            max_tvr = _cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0)
+            min_ic  = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12)
+            stvr = float(screen_metrics.get("Turnover", 0) or 0)
+            sic  = float(screen_metrics.get("IC", 0) or 0)
+            tvr_rescued = False
+            if stvr > max_tvr and sic >= min_ic:
+                print(f"  [tvr-opt] TVR={stvr:.0f} too high but IC={sic:.3f} promising — trying smoothing combos")
+                try:
+                    from autoalpha_v2.tvr_optimizer import try_reduce_tvr
+                    opt_alpha, opt_metrics, opt_name = try_reduce_tvr(
+                        alpha_screen=alpha_screen,
+                        hub=hub,
+                        screen_days=screen_days,
+                        evaluate_fn=evaluate_alpha,
+                        max_tvr=max_tvr,
+                        min_ic=min_ic,
+                    )
+                    if opt_alpha is not None and opt_metrics is not None:
+                        print(f"  [tvr-opt] Rescued via {opt_name} — TVR={opt_metrics.get('Turnover',0):.0f}  IC={opt_metrics.get('IC',0):.3f}")
+                        screen_metrics = opt_metrics
+                        formula = f"tvr_opt:{opt_name}({formula})"
+                        tvr_opt_combo = opt_name
+                        tvr_rescued = True
+                        _append_trace(trace_path, "tvr_opt_rescued",
+                                      {"run_id": run_id, "combo": opt_name, "metrics": opt_metrics})
+                    else:
+                        print("  [tvr-opt] All combos failed — screening out")
+                except Exception as e:
+                    print(f"  [tvr-opt] Optimizer error: {e}")
+
+            if not tvr_rescued:
+                fail_details = _screen_failure_details(screen_metrics, cfg, expected_days=len(screen_days))
+                reason = _screen_failure_reason(screen_metrics, cfg, expected_days=len(screen_days))
+                print(f"  [screen] Rejected ({reason}) — skipping full-history evaluation")
+                _append_trace(
+                    trace_path,
+                    "screen_rejected",
+                    {"run_id": run_id, "formula": formula, "screen_metrics": screen_metrics},
+                )
+                _record_idea_outcome(idea, "screened_out")
+                results.append({
+                    "run_id": run_id,
+                    "formula": formula,
+                    "thought_process": idea.get("thought_process", ""),
+                    **_source_fields(idea),
+                    "postprocess": postmode,
+                    "lookback_days": lookback,
+                    "status": "screened_out",
+                    "screen_fail_reason": reason,
+                    "screen_fail_details": fail_details,
+                    "IC": screen_metrics.get("IC", 0),
+                    "IR": screen_metrics.get("IR", 0),
+                    "tvr": screen_metrics.get("Turnover", 0),
+                    "PassGates": False,
+                    "Score": screen_metrics.get("Score", 0),
+                    "gates_detail": screen_metrics.get("GatesDetail", {}),
+                    "parquet_path": None,
+                    "eval_days": len(eval_days),
+                    "research_path": None,
+                    "screening": {
+                        "stage": "recent_subset",
+                        "days": len(screen_days),
+                        "covered_days": (screen_metrics.get("result_preview") or {}).get("nd", 0),
+                        "promoted": False,
+                        "fail_details": fail_details,
+                        "result_preview": screen_metrics.get("result_preview", {}),
+                        "gates_detail": screen_metrics.get("GatesDetail", {}),
+                    },
+                    "artifact_policy": "skipped_low_signal",
+                })
+                gc.collect()
+                continue
 
         # 3d. Full-history compute + evaluation for promoted ideas
         try:
+            # Use the original formula (strip tvr_opt: prefix) for DSL evaluation
+            raw_formula = formula
+            if tvr_opt_combo and formula.startswith("tvr_opt:"):
+                raw_formula = formula.split("(", 1)[1].rstrip(")")
             alpha = compute_alpha(
-                formula=formula,
+                formula=raw_formula,
                 pv=pv,
                 days=eval_days,
                 lookback_days=lookback,
                 postprocess_mode=postmode,
             )
+            # Re-apply the same TVR-reduction combo that passed screening
+            if tvr_opt_combo:
+                try:
+                    from autoalpha_v2.tvr_optimizer import combo_ema, combo_persistence, combo_extremes, combo_rolling
+                    _combo_map = {
+                        "ema_10":         lambda a: combo_ema(a, span=10),
+                        "persistence_02": lambda a: combo_persistence(a, blend_alpha=0.2),
+                        "extremes_q20":   lambda a: combo_extremes(a, q=0.2),
+                        "rolling_15":     lambda a: combo_rolling(a, window=15),
+                    }
+                    if tvr_opt_combo in _combo_map:
+                        alpha = _combo_map[tvr_opt_combo](alpha)
+                        print(f"  [tvr-opt] Applied {tvr_opt_combo} to full-history alpha")
+                except Exception as e:
+                    print(f"  [tvr-opt] Could not apply combo to full alpha: {e}")
             print(f"  [full-compute] alpha shape={alpha.shape}, "
                   f"non-null={alpha.notna().sum()}, "
                   f"range=[{alpha.min():.3f}, {alpha.max():.3f}]")
@@ -730,6 +879,7 @@ def run(
                 "full_eval_error",
                 {"run_id": run_id, "formula": formula, "error": str(e)},
             )
+            _record_idea_outcome(idea, "compute_error")
             results.append({
                 "run_id": run_id,
                 "formula": formula,
@@ -765,6 +915,14 @@ def run(
                 )
             except Exception as e:
                 print(f"  [WARN] Research analysis error: {e}")
+
+            # If this factor passes gates, update pairwise correlations for ALL passing cards
+            if metrics.get("PassGates") and research_path:
+                try:
+                    n_updated = factor_research.update_all_factor_card_correlations()
+                    print(f"  [research] Global correlation refresh: {n_updated} cards updated")
+                except Exception as e:
+                    print(f"  [WARN] Global correlation update failed: {e}")
         else:
             print("  [artifacts] Skipping parquet/research for low-signal full-history result")
             _append_trace(
@@ -793,15 +951,24 @@ def run(
             "screening": {
                 "stage": "recent_subset",
                 "days": len(screen_days),
+                "covered_days": (screen_metrics.get("result_preview") or {}).get("nd", 0),
                 "promoted": True,
                 "IC": screen_metrics.get("IC", 0),
                 "IR": screen_metrics.get("IR", 0),
                 "Turnover": screen_metrics.get("Turnover", 0),
                 "Score": screen_metrics.get("Score", 0),
+                "result_preview": screen_metrics.get("result_preview", {}),
+                "gates_detail": screen_metrics.get("GatesDetail", {}),
             },
             "artifact_policy": artifact_policy,
         }
         results.append(result)
+        _record_idea_outcome(idea, "passing" if metrics.get("PassGates") else "screened_out")
+        if metrics.get("PassGates"):
+            try:
+                record_inspiration_pass(idea.get("inspiration_ids") or [])
+            except Exception as exc:
+                print(f"  [WARN] Inspiration pass writeback failed: {exc}")
         _append_trace(
             trace_path,
             "result_saved",
@@ -846,6 +1013,7 @@ def run(
                         "IC": ic,
                         "IR": ir,
                         "Turnover": tvr,
+                        "rank": rank_text,
                     },
                     formula=formula,
                     timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

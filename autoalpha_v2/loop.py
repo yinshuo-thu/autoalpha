@@ -31,12 +31,23 @@ from autoalpha_v2.idea_cache import get_default_cache
 from autoalpha_v2.inspiration_fetcher import start_background_fetcher
 from autoalpha_v2.llm_client import summarize_generation_experience
 from core.feishu_bot import FeishuNotifier
-from runtime_config import load_runtime_config
+from runtime_config import get_llm_routing, load_runtime_config
 
 LOG_PATH = Path(__file__).resolve().parent / "loop.log"
 _feishu = FeishuNotifier(
     webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/b4cd233b-5185-4135-8a08-4ffda6305877"
 )
+
+_BILLING_ENDPOINTS = {
+    "subscription": [
+        "https://vip.aipro.love/v1/dashboard/billing/subscription",
+        "http://free.aipro.love/v1/dashboard/billing/subscription",
+    ],
+    "usage": [
+        "https://vip.aipro.love/v1/dashboard/billing/usage?start_date=2020-01-01&end_date=2030-12-31",
+        "http://free.aipro.love/v1/dashboard/billing/usage?start_date=2020-01-01&end_date=2030-12-31",
+    ],
+}
 
 
 def _log(msg: str) -> None:
@@ -71,6 +82,85 @@ def _notify_unexpected_loop_error(round_i: int, error: Exception) -> None:
         pass
 
 
+def _fetch_billing(kind: str, headers: dict[str, str]) -> dict:
+    import requests
+
+    for url in _BILLING_ENDPOINTS.get(kind, []):
+        try:
+            resp = requests.get(url, headers=headers, timeout=10, verify=False)
+            if resp.status_code >= 400:
+                continue
+            data = resp.json()
+            if isinstance(data, dict) and not data.get("error"):
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _quota_snapshot() -> dict[str, float | str]:
+    routing = get_llm_routing()
+    api_key = routing.get("api_key", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    subscription = _fetch_billing("subscription", headers)
+    usage = _fetch_billing("usage", headers)
+    if not subscription and not usage:
+        return {"total": 0.0, "used": 0.0, "remaining": 0.0, "known": 0.0}
+    total_source = float(subscription.get("hard_limit_usd", 0) or 0)
+    used_source = float(usage.get("total_usage", 0) or 0) / 100.0
+    cfg = load_runtime_config()
+    fx_rate = float(cfg.get("AUTOALPHA_QUOTA_DISPLAY_FX", "7.3") or 7.3)
+    fx_rate = fx_rate if fx_rate > 0 else 1.0
+    total = total_source / fx_rate
+    used = used_source / fx_rate
+    remaining = max(0.0, total - used)
+    return {"total": total, "used": used, "remaining": remaining, "known": 1.0 if total > 0 else 0.0}
+
+
+def _notify_quota_exhausted(snapshot: dict[str, float | str], stage: str) -> None:
+    try:
+        _feishu.send_error_notification(
+            title="AutoAlpha 额度耗尽，挖掘已停止",
+            summary=(
+                f"剩余额度 {float(snapshot.get('remaining', 0) or 0):.2f}，"
+                f"已用 {float(snapshot.get('used', 0) or 0):.2f} / "
+                f"{float(snapshot.get('total', 0) or 0):.2f}。"
+            ),
+            stage=stage,
+            error_code="quota_exhausted",
+            suggestion="补充额度或更换可用 API Key 后再启动挖掘。",
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    except Exception:
+        pass
+
+
+def _run_model_lab_snapshot(cfg: dict, n_ideas_per_round: int, eval_days_count: int, target_valid_count: int, min_full_eval_days: int) -> None:
+    try:
+        from autoalpha_v2.rolling_model_lab import run_model_lab
+
+        full_valid_count = len(kb.list_valid_factors(min_eval_days=min_full_eval_days))
+        if full_valid_count <= 0:
+            _log("[model-lab] Skip update: no full-window valid factors yet")
+            return
+        target_for_lab = max(1, min(target_valid_count or full_valid_count or 1, full_valid_count))
+        _log(f"[model-lab] Updating rolling model lab with {target_for_lab} valid factor(s)")
+        summary = run_model_lab(
+            target_valid_count=target_for_lab,
+            ideas_per_round=n_ideas_per_round,
+            eval_days_count=eval_days_count,
+            max_rounds=0,
+            sleep_seconds=0.0,
+            train_days=int(cfg.get("AUTOALPHA_ROLLING_TRAIN_DAYS", "126") or 126),
+            test_days=int(cfg.get("AUTOALPHA_ROLLING_TEST_DAYS", "126") or 126),
+            step_days=int(cfg.get("AUTOALPHA_ROLLING_STEP_DAYS", "126") or 126),
+            allow_partial=True,
+        )
+        _log(f"[model-lab] Finished: best_model={summary.get('best_model')} selected={summary.get('selected_factor_count')}")
+    except Exception as exc:
+        _log(f"[WARN] Model lab update failed: {exc}")
+
+
 def mining_loop(
     n_rounds: int = 5,
     n_ideas_per_round: int = 3,
@@ -89,6 +179,12 @@ def mining_loop(
       5. Print round summary
     """
     cfg = load_runtime_config()
+    source_config = str(cfg.get("AUTOALPHA_INSPIRATION_SOURCES", "paper,llm,future,manual"))
+    source_set = {
+        source.strip().lower()
+        for source in source_config.split(",")
+        if source.strip()
+    }
     try:
         round_pause_sec = max(0.0, float(cfg.get("AUTOALPHA_ROUND_PAUSE_SEC", "1") or 1))
     except (TypeError, ValueError):
@@ -106,18 +202,26 @@ def mining_loop(
     except (TypeError, ValueError):
         inspiration_interval = 1800
 
-    # Start background inspiration fetcher (ArXiv + LLM brainstorm)
+    # Start background inspiration fetcher (Paper + LLM brainstorm)
     try:
         start_background_fetcher(
             interval_seconds=inspiration_interval,
-            llm_ideas=6,
-            arxiv_per_query=5,
+            llm_ideas=1 if "llm" in source_set else 0,
+            paper_results=12,
+            future_files=10 if "future" in source_set else 0,
             run_immediately=True,
         )
     except Exception as exc:
         _log(f"[WARN] Could not start inspiration fetcher: {exc}")
 
     idea_cache = get_default_cache()
+    prompt_version = str(cfg.get("AUTOALPHA_PROMPT_VERSION", "v2-diversity-20260423") or "v2-diversity-20260423")
+    stale_cache_count = 0
+    stale_cache_error = ""
+    try:
+        stale_cache_count = idea_cache.clear_stale(prompt_version)
+    except Exception as exc:
+        stale_cache_error = str(exc)
 
     # Truncate log for this run
     try:
@@ -132,15 +236,34 @@ def mining_loop(
     eval_label = "ALL" if eval_days_count <= 0 else str(eval_days_count)
     target_label = target_valid_count if target_valid_count > 0 else "off"
     _log(f"rounds={n_rounds}  ideas={n_ideas_per_round}  eval_days={eval_label}  target_valid={target_label}")
+    _log(f"inspiration_sources={source_config}")
+    if stale_cache_count:
+        _log(f"[cache] Cleared {stale_cache_count} stale pending ideas for prompt_version={prompt_version}")
+    if stale_cache_error:
+        _log(f"[WARN] Could not clear stale idea cache: {stale_cache_error}")
     _log("=" * 60)
 
     init = kb.get_summary()
     _log(f"Knowledge base: {init['total_tested']} tested / {init['total_passing']} passing / best={init['best_score']:.2f}")
+    last_model_lab_tested = int(init.get("total_tested", 0) or 0)
 
     round_i = 0
     while True:
         if n_rounds > 0 and round_i >= n_rounds:
             break
+        try:
+            quota = _quota_snapshot()
+            if float(quota.get("known", 0) or 0) > 0 and float(quota.get("remaining", 0) or 0) <= 0.01:
+                _log(
+                    "[quota] Exhausted before next round — "
+                    f"remaining={float(quota.get('remaining', 0) or 0):.2f}, "
+                    f"used={float(quota.get('used', 0) or 0):.2f}/{float(quota.get('total', 0) or 0):.2f}. "
+                    "Stopping mining loop."
+                )
+                _notify_quota_exhausted(quota, stage=f"Loop Round {round_i + 1}")
+                break
+        except Exception as exc:
+            _log(f"[WARN] Quota preflight failed; continue cautiously: {exc}")
         round_i += 1
         _log(f"")
         round_label = f"{round_i}/{n_rounds}" if n_rounds > 0 else f"{round_i}/target"
@@ -166,6 +289,14 @@ def mining_loop(
             )
         except Exception as e:
             _log(f"[ERROR] Pipeline failed in round {round_i}: {e}")
+            if isinstance(e, AutoAlphaRuntimeError) and e.error_code == "quota_exhausted":
+                snapshot = {"remaining": 0.0, "used": 0.0, "total": 0.0}
+                try:
+                    snapshot = _quota_snapshot()
+                except Exception:
+                    pass
+                _notify_quota_exhausted(snapshot, stage=f"Loop Round {round_i}")
+                break
             _notify_unexpected_loop_error(round_i, e)
             results = []
 
@@ -178,7 +309,9 @@ def mining_loop(
             except Exception as e:
                 _log(f"[WARN] Failed to save factor to KB: {e}")
 
-        # Write a generation-level research memory note after the new results land.
+        # Write a generation-level research memory note for newly completed generations only.
+        # A generation is "new" when it appears for the first time this round and has no
+        # existing summary yet — avoids re-calling the LLM every round for the same gen.
         touched_generations: set[int] = set()
         for result in results:
             try:
@@ -189,6 +322,8 @@ def mining_loop(
                 pass
         for generation in sorted(touched_generations):
             try:
+                if kb.get_generation_experience(generation):
+                    continue  # already summarised — skip to avoid redundant LLM calls
                 payload = kb.build_generation_experience_payload(generation)
                 if payload.get("total", 0) <= 0:
                     continue
@@ -211,6 +346,11 @@ def mining_loop(
         _log(f"Cumulative KB: {summary['total_tested']} tested / {summary['total_passing']} passing / best={summary['best_score']:.2f}")
         full_valid_count = len(kb.list_valid_factors(min_eval_days=min_full_eval_days))
         _log(f"Full-window valid factors (>= {min_full_eval_days} days): {full_valid_count}")
+        tested_now = int(summary.get("total_tested", 0) or 0)
+        model_lab_interval = int(cfg.get("AUTOALPHA_MODEL_LAB_INTERVAL_FACTORS", "10") or 10)
+        if model_lab_interval > 0 and tested_now - last_model_lab_tested >= model_lab_interval:
+            _run_model_lab_snapshot(cfg, n_ideas_per_round, eval_days_count, target_valid_count, min_full_eval_days)
+            last_model_lab_tested = tested_now
         if target_valid_count > 0 and full_valid_count >= target_valid_count:
             _log(f"Target reached: {full_valid_count} valid full-window factors >= requested {target_valid_count}")
             break
@@ -244,28 +384,7 @@ def mining_loop(
     _log("=" * 60)
 
     if run_model_lab_on_finish:
-        try:
-            from autoalpha_v2.rolling_model_lab import run_model_lab
-
-            full_valid_count = len(kb.list_valid_factors(min_eval_days=min_full_eval_days))
-            target_for_lab = max(1, min(target_valid_count or full_valid_count or 1, full_valid_count or 1))
-            _log(f"Starting model lab with {target_for_lab} valid factor(s)",)
-            summary = run_model_lab(
-                target_valid_count=target_for_lab,
-                ideas_per_round=n_ideas_per_round,
-                eval_days_count=eval_days_count,
-                max_rounds=0,
-                sleep_seconds=0.0,
-                train_days=int(cfg.get("AUTOALPHA_ROLLING_TRAIN_DAYS", "126") or 126),
-                test_days=int(cfg.get("AUTOALPHA_ROLLING_TEST_DAYS", "126") or 126),
-                step_days=int(cfg.get("AUTOALPHA_ROLLING_STEP_DAYS", "126") or 126),
-                allow_partial=True,
-            )
-            _log(
-                f"Model lab finished: best_model={summary.get('best_model')} selected={summary.get('selected_factor_count')}",
-            )
-        except Exception as exc:
-            _log(f"[WARN] Model lab failed after mining: {exc}")
+        _run_model_lab_snapshot(cfg, n_ideas_per_round, eval_days_count, target_valid_count, min_full_eval_days)
 
 
 def main() -> int:

@@ -2,8 +2,8 @@
 autoalpha_v2/inspiration_fetcher.py
 
 Multi-source inspiration fetcher.  Supported sources:
-  - arxiv   : query the public ArXiv API for quant-finance papers
-  - url     : fetch any HTTP URL (WeChat articles, blog posts, …)
+  - paper   : query broader scholarly/web indices plus curated quant papers
+  - manual  : user-provided URLs / notes
   - llm     : ask the cheap LLM model to brainstorm new alpha directions
   - future  : distill local futures-factor Markdown notes from fut_feat/
 
@@ -17,7 +17,6 @@ import hashlib
 import re
 import threading
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,20 +30,119 @@ from autoalpha_v2.inspiration_db import (
     save_inspiration,
 )
 
-# ─── ArXiv query template ────────────────────────────────────────────────────
-_ARXIV_API = "https://export.arxiv.org/api/query"
-_ARXIV_QUERIES = [
-    "intraday alpha factor finance microstructure",
-    "quantitative trading factor momentum reversal",
-    "high frequency price volume signal machine learning",
-    "cross-sectional stock return prediction neural",
-    "order flow imbalance price impact short-term",
-    "intrabar range volatility breakout signal",
-    "trade count participation signal alpha",
+# Broad scholarly search API. OpenAlex is not arXiv-specific and works without
+# an API key, so it gives the fetcher a wider outside-world idea surface.
+_OPENALEX_API = "https://api.openalex.org/works"
+_OPENALEX_QUERIES = [
+    "intraday stock return predictability order flow volume reversal",
+    "cross sectional stock returns momentum reversal liquidity factor",
+    "stock return prediction technical indicators volume price factor",
+    "market microstructure price impact order imbalance return prediction",
 ]
 
-# ─── Curated URL sources ─────────────────────────────────────────────────────
-# WeChat / blog articles the user may want to regularly harvest
+_QUANT_PAPER_KEYWORDS = (
+    "stock return", "returns", "cross-section", "cross-sectional", "intraday",
+    "high-frequency", "momentum", "reversal", "liquidity", "volume",
+    "order flow", "order imbalance", "price impact", "volatility", "factor",
+    "anomaly", "predictability", "prediction", "forecast",
+)
+_QUANT_PAPER_REJECT_KEYWORDS = (
+    "cryptocurrency", "bitcoin", "option pricing", "credit risk", "textual",
+    "sentiment", "news", "esg", "climate", "macro", "fundamental only",
+)
+
+# High-signal papers found through broad web/scholarly search.  These are kept as
+# a deterministic floor so the library has useful outside ideas even if a live
+# search endpoint is temporarily unavailable.
+_CURATED_QUANT_PAPERS: List[Dict[str, str]] = [
+    {
+        "title": "Intraday Patterns in the Cross-Section of Stock Returns",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1509466",
+        "published_date": "2010-05-26",
+        "summary": "Half-hour return continuation at daily lags, plus short-run reversal tied to temporary liquidity imbalance.",
+        "mechanism": "Test same-clock intraday continuation and sub-hour reversal using lagged 15-minute returns, volume, volatility and liquidity proxies.",
+    },
+    {
+        "title": "How and When are High-Frequency Stock Returns Predictable?",
+        "source": "https://www.nber.org/papers/w30366",
+        "published_date": "2022-08-01",
+        "summary": "Ultra high-frequency stock returns and durations are predictable from recent price, volume and transaction events.",
+        "mechanism": "Build event-recency factors from short-horizon returns, trade counts, volume bursts and quote/trade activity.",
+    },
+    {
+        "title": "Intraday Market Return Predictability Culled from the Factor Zoo",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4388560",
+        "published_date": "2023-03-14",
+        "summary": "Lagged high-frequency cross-sectional factor-zoo returns predict intraday aggregate market returns.",
+        "mechanism": "Compress cross-sectional lagged factor returns into regularized intraday predictors and separate continuous from jump-like moves.",
+    },
+    {
+        "title": "Liquidity Risk and Expected Stock Returns",
+        "source": "https://www.nber.org/papers/w8462",
+        "published_date": "2001-09-01",
+        "summary": "Expected returns relate to liquidity sensitivity; liquidity is measured through order-flow-induced reversals.",
+        "mechanism": "Use return reversal after volume shocks as an illiquidity/liquidity-risk signal for cross-sectional ranking.",
+    },
+    {
+        "title": "Evaporating Liquidity",
+        "source": "https://www.nber.org/papers/w17653",
+        "published_date": "2011-12-01",
+        "summary": "Short-term reversal strategy returns proxy time-varying liquidity provision returns.",
+        "mechanism": "Condition reversal strength on recent volatility/liquidity stress using intraday range, turnover and short-lag return reversal.",
+    },
+    {
+        "title": "Liquidity and Autocorrelations in Individual Stock Returns",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=555968",
+        "published_date": "2005-01-12",
+        "summary": "Short-run reversals are strongest in high-turnover, low-liquidity stocks after controlling for trading volume.",
+        "mechanism": "Rank names by turnover-adjusted illiquidity and recent return autocorrelation to capture transient price pressure.",
+    },
+    {
+        "title": "Persistence or Reversal? The Effects of Abnormal Trading Volume on Stock Returns",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4346340",
+        "published_date": "2023-02-02",
+        "summary": "Abnormal trading volume predicts short-run persistence and longer-run reversal through volume persistence.",
+        "mechanism": "Measure abnormal volume persistence and interact it with recent return direction for drift-versus-reversal timing.",
+    },
+    {
+        "title": "Overnight Returns and the Timing of Trading Volume",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5004991",
+        "published_date": "2024-10-30",
+        "summary": "U-shaped intraday trading activity predicts higher overnight returns and links to overnight momentum.",
+        "mechanism": "Compare open/close volume concentration versus close-only concentration as an overnight continuation signal.",
+    },
+    {
+        "title": "Machine Learning Techniques for Cross-Sectional Equity Returns' Prediction",
+        "source": "https://link.springer.com/article/10.1007/s00291-022-00693-w",
+        "published_date": "2022-09-28",
+        "summary": "Machine learning improves cross-sectional equity return forecasts using lagged stock-level predictors.",
+        "mechanism": "Use nonlinear combinations of technical return, volatility, liquidity and volume features for cross-sectional ranking.",
+    },
+    {
+        "title": "Machine Learning Goes Global: Cross-Sectional Return Predictability in International Stock Markets",
+        "source": "https://www.sciencedirect.com/science/article/pii/S0165188923001318",
+        "published_date": "2023-10-01",
+        "summary": "Return predictability across global equities comes largely from momentum, reversal, value and size-style predictors.",
+        "mechanism": "Prioritize simple technical factor families such as momentum, reversal and liquidity before complex interactions.",
+    },
+    {
+        "title": "Machine Learning and The Cross-Section of Emerging Market Stock Returns",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4287550",
+        "published_date": "2023-03-13",
+        "summary": "Nonlinear and interaction-aware models outperform linear models for emerging-market stock return prediction.",
+        "mechanism": "Search interactions between recent return, volatility, turnover and liquidity constraints for underreaction signals.",
+    },
+    {
+        "title": "The Momentum Gap and Return Predictability",
+        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2318858",
+        "published_date": "2019-02-28",
+        "summary": "The gap between winner and loser formation returns predicts future momentum profitability.",
+        "mechanism": "Use dispersion between recent winners and losers to gate momentum versus reversal factor exposure.",
+    },
+]
+
+# ─── Curated manual URL sources ──────────────────────────────────────────────
+# User-provided article URLs that should be harvested during fetch cycles.
 _DEFAULT_URL_SOURCES: List[str] = []   # populated by add_url_source() or config
 _FUTURE_MD_DIR = AUTOALPHA_DIR.parent / "fut_feat"
 
@@ -80,75 +178,155 @@ def add_url_source(url: str) -> None:
             _url_sources.append(url)
 
 
-# ─── ArXiv fetch ─────────────────────────────────────────────────────────────
+# ─── Broader paper search / curated quant papers ─────────────────────────────
 
-def _arxiv_entry_to_record(entry: ET.Element, ns: str) -> Optional[Dict[str, Any]]:
-    def tag(name: str) -> Optional[ET.Element]:
-        return entry.find(f"{ns}{name}")
+def _paper_relevance_score(title: str, summary: str) -> tuple[bool, float, str]:
+    text = f"{title} {summary}".lower()
+    hits = [kw for kw in _QUANT_PAPER_KEYWORDS if kw in text]
+    rejects = [kw for kw in _QUANT_PAPER_REJECT_KEYWORDS if kw in text]
+    has_return_signal = any(kw in text for kw in ("return", "predict", "forecast", "anomaly", "momentum", "reversal"))
+    has_market_micro = any(kw in text for kw in ("stock", "equity", "intraday", "volume", "liquidity", "order", "price"))
+    score = min(0.98, 0.25 + 0.07 * len(hits) - 0.12 * len(rejects))
+    keep = has_return_signal and has_market_micro and len(hits) >= 3 and score >= 0.62
+    reason = f"hits: {', '.join(hits[:8])}" if hits else "no quant-factor keyword hits"
+    if rejects:
+        reason += f"; rejects: {', '.join(rejects[:4])}"
+    return keep, max(0.0, min(1.0, score)), reason
 
-    id_el = tag("id")
-    title_el = tag("title")
-    summary_el = tag("summary")
-    published_el = tag("published")
 
-    if title_el is None or id_el is None:
-        return None
-
-    arxiv_url = (id_el.text or "").strip()
-    arxiv_id = arxiv_url.split("/abs/")[-1] if "/abs/" in arxiv_url else arxiv_url
-    title = _trim_text((title_el.text or "").replace("\n", " "), limit=120)
-    abstract = _trim_text((summary_el.text or "").replace("\n", " "), limit=600) if summary_el else ""
-    published = (published_el.text or "")[:10] if published_el else ""
-
-    content = f"Title: {title}\nArXiv ID: {arxiv_id}\nPublished: {published}\nAbstract: {abstract}"
-    source_hash = hashlib.sha256(f"arxiv:{arxiv_id}".encode()).hexdigest()
-
+def _quant_paper_record(
+    *,
+    title: str,
+    source: str,
+    summary: str,
+    mechanism: str = "",
+    published_date: str = "",
+    tags: str = "paper,external-search,quant-factor",
+    quality_score: float = 0.86,
+) -> Dict[str, Any]:
+    content = (
+        f"Title: {title}\n"
+        f"Source: {source}\n"
+        f"Published: {published_date}\n"
+        f"Summary: {summary}\n"
+        f"Factor idea: {mechanism or summary}\n"
+    )
+    source_hash = hashlib.sha256(f"paper:{source}".encode("utf-8")).hexdigest()
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", title)[:48].strip("_").lower() or source_hash[:12]
     return {
         "kind": "url",
         "title": title[:80],
-        "source": arxiv_url,
-        "content": content,
-        "summary": abstract[:280],
-        "tags": "arxiv,quant-finance",
-        "relative_path": f"inspirations/arxiv_{arxiv_id.replace('/', '_')}.md",
+        "source": source,
+        "content": _trim_text(content, limit=4000),
+        "summary": _trim_text(summary, limit=280),
+        "tags": tags,
+        "relative_path": f"inspirations/paper_{slug}.md",
         "source_hash": source_hash,
-        "source_type": "arxiv",
-        "arxiv_id": arxiv_id,
-        "published_date": published,
-        "quality_score": 0.0,
+        "source_type": "paper",
+        "published_date": published_date,
+        "quality_score": quality_score,
     }
 
 
-def fetch_arxiv(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
+def fetch_openalex_quant_papers(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
+    """Fetch broader scholarly-paper ideas through OpenAlex and strict keyword gating."""
     try:
         resp = requests.get(
-            _ARXIV_API,
+            _OPENALEX_API,
             params={
-                "search_query": f"all:{query}",
-                "max_results": max_results,
-                "sortBy": "submittedDate",
-                "sortOrder": "descending",
+                "search": query,
+                "filter": "from_publication_date:2000-01-01",
+                "sort": "relevance_score:desc",
+                "per-page": min(max(max_results * 4, max_results), 50),
             },
-            timeout=20,
+            timeout=18,
         )
         resp.raise_for_status()
+        data = resp.json()
     except Exception as exc:
-        print(f"[fetcher] ArXiv query failed: {exc}")
+        print(f"[fetcher] OpenAlex query failed: {exc}")
         return []
 
-    try:
-        root = ET.fromstring(resp.text)
-    except ET.ParseError as exc:
-        print(f"[fetcher] ArXiv XML parse error: {exc}")
-        return []
+    records: List[Dict[str, Any]] = []
+    for item in data.get("results", []):
+        title = _trim_text(item.get("title") or "", limit=140)
+        if not title:
+            continue
+        abstract_index = item.get("abstract_inverted_index") or {}
+        abstract_words: list[tuple[int, str]] = []
+        for word, positions in abstract_index.items():
+            for pos in positions:
+                abstract_words.append((int(pos), word))
+        abstract = " ".join(word for _, word in sorted(abstract_words)) if abstract_words else ""
+        summary = _trim_text(abstract, limit=500) or title
+        keep, score, reason = _paper_relevance_score(title, summary)
+        if not keep:
+            print(f"[fetcher] OpenAlex screened out: {title} ({reason})")
+            continue
+        source = (
+            (item.get("primary_location") or {}).get("landing_page_url")
+            or item.get("doi")
+            or item.get("id")
+            or ""
+        )
+        if source.startswith("https://doi.org/"):
+            pass
+        elif source.startswith("10."):
+            source = f"https://doi.org/{source}"
+        if not source:
+            continue
+        published_date = str(item.get("publication_date") or "")[:10]
+        records.append(_quant_paper_record(
+            title=title,
+            source=source,
+            summary=summary,
+            mechanism=f"Broad scholarly search match for: {query}. {reason}",
+            published_date=published_date,
+            tags="paper,openalex,external-search,quant-factor",
+            quality_score=score,
+        ))
+        if len(records) >= max_results:
+            break
+    return records
 
-    ns_match = re.match(r"\{[^}]+\}", root.tag)
-    ns = ns_match.group(0) if ns_match else ""
-    records = []
-    for entry in root.findall(f"{ns}entry"):
-        rec = _arxiv_entry_to_record(entry, ns)
-        if rec:
+
+def fetch_curated_quant_papers(limit: int = 12) -> List[Dict[str, Any]]:
+    """Return deterministic high-quality quant-factor papers with preserved links."""
+    records: List[Dict[str, Any]] = []
+    for item in _CURATED_QUANT_PAPERS[:limit]:
+        records.append(_quant_paper_record(
+            title=item["title"],
+            source=item["source"],
+            summary=item["summary"],
+            mechanism=item["mechanism"],
+            published_date=item.get("published_date", ""),
+            tags="paper,curated,external-search,quant-factor,ohlcv",
+            quality_score=0.9,
+        ))
+    return records
+
+
+def fetch_quant_papers(max_results: int = 12) -> List[Dict[str, Any]]:
+    """Combine broad live search with curated high-signal papers."""
+    records: List[Dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for query in _OPENALEX_QUERIES:
+        for rec in fetch_openalex_quant_papers(query, max_results=4):
+            source = str(rec.get("source") or "")
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
             records.append(rec)
+            if len(records) >= max_results:
+                return records
+    for rec in fetch_curated_quant_papers(limit=max_results):
+        source = str(rec.get("source") or "")
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        records.append(rec)
+        if len(records) >= max_results:
+            break
     return records
 
 
@@ -170,11 +348,10 @@ def fetch_url_inspiration(url: str) -> Optional[Dict[str, Any]]:
             "source": url,
             "content": content,
             "summary": _heuristic_summary(content),
-            "tags": "url,wechat",
+            "tags": "manual,url",
             "relative_path": relative_path,
             "source_hash": _build_source_hash(relative_path, content),
-            "source_type": "wechat" if "mp.weixin.qq.com" in url else "url",
-            "arxiv_id": "",
+            "source_type": "manual",
             "published_date": "",
             "quality_score": 0.0,
         }
@@ -225,7 +402,6 @@ def generate_llm_inspirations(n: int = 6) -> List[Dict[str, Any]]:
             "relative_path": f"inspirations/llm_{source_hash[:12]}.md",
             "source_hash": source_hash,
             "source_type": "llm",
-            "arxiv_id": "",
             "published_date": datetime.now().strftime("%Y-%m-%d"),
             "quality_score": 0.0,
         })
@@ -263,7 +439,6 @@ def fetch_future_factor_inspirations(max_files: int = 10) -> List[Dict[str, Any]
             "relative_path": f"inspirations/future_{path.stem}.md",
             "source_hash": source_hash,
             "source_type": "future",
-            "arxiv_id": "",
             "published_date": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
             "quality_score": 0.6,
         })
@@ -273,30 +448,26 @@ def fetch_future_factor_inspirations(max_files: int = 10) -> List[Dict[str, Any]
 # ─── Full fetch cycle ─────────────────────────────────────────────────────────
 
 def run_fetch_cycle(
-    arxiv_queries: Optional[List[str]] = None,
     extra_urls: Optional[List[str]] = None,
     llm_ideas: int = 6,
-    arxiv_per_query: int = 5,
+    paper_results: int = 12,
     future_files: int = 10,
 ) -> Dict[str, Any]:
     """
     Run one full inspiration-fetch cycle.
     Returns a summary dict of what was added.
     """
-    queries = arxiv_queries or _ARXIV_QUERIES
-    added = {"arxiv": 0, "url": 0, "llm": 0, "future": 0, "skipped": 0}
+    added = {"paper": 0, "manual": 0, "llm": 0, "future": 0, "skipped": 0, "screened_out": 0}
 
-    # 1. ArXiv — rotate through queries
-    query = queries[int(time.time()) % len(queries)]
-    print(f"[fetcher] ArXiv query: {query!r}")
-    for rec in fetch_arxiv(query, max_results=arxiv_per_query):
+    # 1. Broader external paper search plus curated quant-factor papers
+    for rec in fetch_quant_papers(max_results=paper_results):
         result = save_inspiration(rec)
         if result.get("was_new"):
-            added["arxiv"] += 1
+            added["paper"] += 1
         else:
             added["skipped"] += 1
 
-    # 2. URL sources (WeChat articles etc.)
+    # 2. Manual URL sources
     all_urls = list(extra_urls or [])
     with _url_sources_lock:
         all_urls += list(_url_sources)
@@ -305,7 +476,7 @@ def run_fetch_cycle(
         if rec:
             result = save_inspiration(rec)
             if result.get("was_new"):
-                added["url"] += 1
+                added["manual"] += 1
             else:
                 added["skipped"] += 1
 
@@ -327,7 +498,7 @@ def run_fetch_cycle(
                 added["skipped"] += 1
 
     print(
-        f"[fetcher] Cycle done — arxiv={added['arxiv']} url={added['url']} "
+        f"[fetcher] Cycle done — paper={added['paper']} manual={added['manual']} "
         f"llm={added['llm']} future={added['future']} skipped={added['skipped']}"
     )
     return added
@@ -342,7 +513,8 @@ _bg_stop = threading.Event()
 def start_background_fetcher(
     interval_seconds: int = 1800,
     llm_ideas: int = 6,
-    arxiv_per_query: int = 5,
+    paper_results: int = 12,
+    future_files: int = 10,
     run_immediately: bool = True,
 ) -> threading.Thread:
     """
@@ -359,12 +531,12 @@ def start_background_fetcher(
     def _worker():
         if run_immediately:
             try:
-                run_fetch_cycle(llm_ideas=llm_ideas, arxiv_per_query=arxiv_per_query)
+                run_fetch_cycle(llm_ideas=llm_ideas, paper_results=paper_results, future_files=future_files)
             except Exception as exc:
                 print(f"[fetcher-bg] Initial cycle error: {exc}")
         while not _bg_stop.wait(timeout=interval_seconds):
             try:
-                run_fetch_cycle(llm_ideas=llm_ideas, arxiv_per_query=arxiv_per_query)
+                run_fetch_cycle(llm_ideas=llm_ideas, paper_results=paper_results, future_files=future_files)
             except Exception as exc:
                 print(f"[fetcher-bg] Cycle error: {exc}")
 

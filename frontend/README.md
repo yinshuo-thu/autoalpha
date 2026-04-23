@@ -1,4 +1,4 @@
-# QuantaAlpha AI V2 - 全新设计 🚀
+# AutoAlpha UI V2 - 全新设计 🚀
 
 > 🎨 **高级美观** | 📊 **实时可视化** | 🤖 **AI 驱动** | ⚡ **极速调试** | 📚 **因子管理** | ⚙️ **配置中心**
 
@@ -38,7 +38,7 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │  ✨ Header (Fixed Top)                               │
-│  [Logo] QuantaAlpha AI    [因子挖掘][因子库][设置] │
+│  [Logo] AutoAlpha    [因子挖掘][因子库][设置] │
 ├─────────────────────────────────────────────────────┤
 │                                                       │
 │  📄 当前页面内容                                      │
@@ -59,7 +59,7 @@ cd frontend-v2
 
 ### 手动启动
 ```bash
-# 终端 1 - 后端（在已激活 quantaalpha conda 环境的前提下）
+# 终端 1 - 后端（在已激活 autoalpha conda 环境的前提下）
 cd frontend-v2
 pip install -r backend/requirements.txt
 python backend/app.py
@@ -106,12 +106,13 @@ npm run dev
 ## 💾 数据存储
 
 ### localStorage 缓存
-- **配置数据**: `quantaalpha_config`
-- **因子数据**: `quantaalpha_factors`
+- **配置数据**: `autoalpha_config`（首次读取时自动从旧键 `quantaalpha_config` 迁移）
+- **因子数据**: `autoalpha_factors`（同上，`quantaalpha_factors` → 迁移）
+- **当前因子库名**: `autoalpha_active_library`
 
 ### 数据格式
 
-**配置 (quantaalpha_config)**:
+**配置 (autoalpha_config)**:
 ```json
 {
   "apiKey": "sk-...",
@@ -127,7 +128,7 @@ npm run dev
 }
 ```
 
-**因子 (quantaalpha_factors)**:
+**因子 (autoalpha_factors)**:
 ```json
 [
   {
@@ -247,7 +248,7 @@ frontend-v2/
 ### 因子库为空
 - 首次使用会生成 30 个示例因子
 - 点击 "刷新" 按钮重新加载
-- 检查 localStorage 中的 `quantaalpha_factors`
+- 检查 localStorage 中的 `autoalpha_factors`
 
 ### 导航菜单不显示
 - 确保在主页之外的页面
@@ -292,4 +293,4 @@ frontend-v2/
 
 **🎨 更美观 | 📊 更直观 | ⚡ 更快速 | 🚀 更高级 | 📚 更完善**
 
-Made with ❤️ by QuantaAlpha Team
+Made with ❤️ by AutoAlpha

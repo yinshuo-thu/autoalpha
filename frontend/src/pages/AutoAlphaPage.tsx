@@ -11,13 +11,13 @@ import {
   LineChart,
   Pie,
   PieChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import { BrainCircuit, FileStack, FlaskConical, FolderSync, Sparkles, Wand2 } from 'lucide-react';
-import { Progress } from '@/components/ui/Progress';
 
 interface KbFactor {
   run_id: string;
@@ -37,7 +37,14 @@ interface KbFactor {
   gates_detail?: Record<string, boolean>;
   parquet_path?: string;
   research_path?: string;
+  factor_card_path?: string;
   parent_run_ids?: string[];
+  live_submitted?: boolean;
+  live_test_result?: {
+    raw?: string;
+    data?: any;
+    submitted_at?: string;
+  };
 }
 
 interface LoopStatus {
@@ -131,10 +138,28 @@ interface ModelLabModelSummary {
   avg_daily_rank_ic: number;
   avg_sharpe: number;
   total_pnl: number;
+  gross_pnl?: number;
+  total_fee?: number;
   max_drawdown: number;
   hit_ratio: number;
+  avg_turnover?: number;
   cumulative_curve: ModelLabPoint[];
+  drawdown_curve?: ModelLabPoint[];
+  gross_cumulative_curve?: ModelLabPoint[];
+  fee_cumulative_curve?: ModelLabPoint[];
   daily_pnl_curve: ModelLabPoint[];
+  prediction_comparison_curve?: Array<{
+    date: string;
+    mean_prediction: number;
+    mean_return: number;
+    mean_prediction_aligned?: number;
+    predicted_spread: number;
+    realized_spread: number;
+    predicted_spread_aligned?: number;
+    window_id?: number;
+    test_start?: string;
+    test_end?: string;
+  }>;
   top_features: Array<{
     factor: string;
     importance: number;
@@ -160,6 +185,9 @@ interface ModelLabWindow {
       sharpe: number;
       max_drawdown: number;
       hit_ratio: number;
+      avg_turnover?: number;
+      gross_pnl?: number;
+      total_fee?: number;
     }
   >;
 }
@@ -200,11 +228,25 @@ interface ModelLabPayload {
   }>;
 }
 
+interface FeatureConsensusPoint {
+  factor: string;
+  shortLabel: string;
+  consensusImportance: number;
+  avgImportance: number;
+  supportCount: number;
+  supportRatio: number;
+  models: string[];
+  formula?: string;
+  score?: number;
+  ic?: number;
+}
+
 interface InspirationRecord {
   id: number;
   kind: string;
   title: string;
   source: string;
+  source_type?: string;
   content: string;
   summary: string;
   relative_path: string;
@@ -222,6 +264,20 @@ interface InspirationPayload {
 interface RuntimeConfigPayload {
   env?: Record<string, string>;
   paths?: Record<string, string>;
+}
+
+interface ResearchReport {
+  run_id?: string;
+  formula?: string;
+  factor_card?: {
+    run_id?: string;
+    title?: string;
+    status?: string;
+    theme?: string;
+    metrics?: Record<string, any>;
+    diagnostics?: Record<string, any>;
+  };
+  factor_card_path?: string;
 }
 
 interface ManualFactor {
@@ -246,8 +302,9 @@ const COLORS = {
   used: '#f97316',
   remaining: '#10b981',
   tested: '#60a5fa',
-  passing: '#34d399',
-  passRate: '#8b5cf6',
+  passing: '#059669',
+  passRate: '#7c3aed',
+  efficiency: '#ea580c',
   bestScore: '#0f766e',
   score: '#15803d',
   ic: '#2563eb',
@@ -256,7 +313,12 @@ const COLORS = {
   pnlA: '#0f766e',
   pnlB: '#2563eb',
   pnlC: '#9333ea',
+  tvr: '#0f766e',
+  sharpe: '#be123c',
+  netPnl: '#0369a1',
 };
+
+const MODEL_COLORS = ['#0f766e', '#2563eb', '#9333ea', '#dc2626', '#0891b2', '#ca8a04', '#4f46e5', '#16a34a'];
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -311,6 +373,17 @@ function formatAxisTime(value?: string) {
   });
 }
 
+function formatRollingDate(value?: string) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return truncate(value, 10);
+  return date.toLocaleDateString('zh-CN', {
+    year: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
 function truncate(text: string, length: number) {
   if (!text) return '—';
   return text.length > length ? `${text.slice(0, length)}…` : text;
@@ -348,16 +421,191 @@ function quotaTone(status: BalancePayload['quota_status']) {
   return 'text-red-400';
 }
 
-function buildMergedModelCurves(models: Record<string, ModelLabModelSummary> | undefined) {
+function mergeModelCurves(curvesByModel: Record<string, ModelLabPoint[]>) {
   const merged = new Map<string, Record<string, string | number>>();
-  Object.entries(models || {}).forEach(([modelName, payload]) => {
-    payload.cumulative_curve.forEach((point) => {
-      const row = merged.get(point.date) || { date: point.date, label: point.date.slice(5) };
+  Object.entries(curvesByModel).forEach(([modelName, points]) => {
+    points.forEach((point) => {
+      const row = merged.get(point.date) || { date: point.date };
       row[modelName] = point.value;
       merged.set(point.date, row);
     });
   });
   return Array.from(merged.values()).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+function buildMergedModelCurves(models: Record<string, ModelLabModelSummary> | undefined) {
+  const curvesByModel = Object.fromEntries(
+    Object.entries(models || {}).map(([modelName, payload]) => [modelName, payload.cumulative_curve || []])
+  );
+  return mergeModelCurves(curvesByModel);
+}
+
+function buildMergedDrawdownCurves(models: Record<string, ModelLabModelSummary> | undefined) {
+  const curvesByModel = Object.fromEntries(
+    Object.entries(models || {}).map(([modelName, payload]) => {
+      const drawdownCurve = payload.drawdown_curve?.length
+        ? payload.drawdown_curve
+        : (() => {
+            let peak = Number.NEGATIVE_INFINITY;
+            return (payload.cumulative_curve || []).map((point) => {
+              peak = Math.max(peak, Number(point.value || 0));
+              return { date: point.date, value: Number(point.value || 0) - peak };
+            });
+          })();
+      return [modelName, drawdownCurve];
+    })
+  );
+  return mergeModelCurves(curvesByModel);
+}
+
+function alignSeriesMeanStd(source: number[], target: number[]) {
+  if (source.length !== target.length || source.length === 0) return source;
+  const cleanSource = source.map((value) => (Number.isFinite(value) ? value : 0));
+  const cleanTarget = target.map((value) => (Number.isFinite(value) ? value : 0));
+  const sourceMean = cleanSource.reduce((sum, value) => sum + value, 0) / cleanSource.length;
+  const targetMean = cleanTarget.reduce((sum, value) => sum + value, 0) / cleanTarget.length;
+  const sourceVariance = cleanSource.reduce((sum, value) => sum + ((value - sourceMean) ** 2), 0) / cleanSource.length;
+  const targetVariance = cleanTarget.reduce((sum, value) => sum + ((value - targetMean) ** 2), 0) / cleanTarget.length;
+  const sourceStd = Math.sqrt(sourceVariance);
+  const targetStd = Math.sqrt(targetVariance);
+  if (!Number.isFinite(sourceStd) || sourceStd <= 0) {
+    return cleanSource.map(() => targetMean);
+  }
+  const scale = Number.isFinite(targetStd) && targetStd > 0 ? targetStd / sourceStd : 0;
+  return cleanSource.map((value) => ((value - sourceMean) * scale) + targetMean);
+}
+
+function buildPredictionComparisonCurve(model?: ModelLabModelSummary) {
+  const points = [...(model?.prediction_comparison_curve || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (points.length === 0) return [];
+  const alignedSpread = alignSeriesMeanStd(
+    points.map((point) => Number(point.predicted_spread || 0)),
+    points.map((point) => Number(point.realized_spread || 0))
+  );
+  const alignedMean = alignSeriesMeanStd(
+    points.map((point) => Number(point.mean_prediction || 0)),
+    points.map((point) => Number(point.mean_return || 0))
+  );
+  return points.map((point, index) => ({
+    ...point,
+    predicted_spread_display: Number(
+      point.predicted_spread_aligned ?? alignedSpread[index] ?? point.predicted_spread ?? 0
+    ),
+    mean_prediction_display: Number(
+      point.mean_prediction_aligned ?? alignedMean[index] ?? point.mean_prediction ?? 0
+    ),
+  }));
+}
+
+function compactFeatureLabel(value: string) {
+  if (!value) return '—';
+  return value.length <= 20 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function featureConsensusColor(supportRatio: number) {
+  if (supportRatio >= 0.99) return '#0f766e';
+  if (supportRatio >= 0.66) return '#2563eb';
+  if (supportRatio >= 0.5) return '#7c3aed';
+  return '#94a3b8';
+}
+
+function buildFeatureConsensus(
+  models: Record<string, ModelLabModelSummary> | undefined,
+  selectedFactors: ModelLabSummary['selected_factors'] | undefined
+) {
+  const modelEntries = Object.entries(models || {});
+  if (modelEntries.length === 0) return [];
+
+  const selectedMap = new Map(
+    (selectedFactors || []).map((factor) => [
+      factor.run_id,
+      { formula: factor.formula, score: factor.score, ic: factor.ic },
+    ])
+  );
+
+  const aggregated = new Map<
+    string,
+    {
+      factor: string;
+      consensusImportance: number;
+      totalImportance: number;
+      supportCount: number;
+      models: string[];
+      formula?: string;
+      score?: number;
+      ic?: number;
+    }
+  >();
+
+  modelEntries.forEach(([modelName, payload]) => {
+    const performanceWeight = Math.max(
+      0.7,
+      1 + (Math.max(payload.avg_daily_ic, 0) * 10) + (Math.max(payload.avg_sharpe, 0) * 0.06)
+    );
+
+    (payload.top_features || []).slice(0, 8).forEach((item, index) => {
+      const factor = String(item.factor || '').trim();
+      if (!factor) return;
+
+      const meta = selectedMap.get(factor);
+      const rankBoost = 1 + ((8 - index) / 10);
+      const importance = Number(item.importance || 0);
+      const weightedImportance = importance * performanceWeight * rankBoost;
+      const current = aggregated.get(factor) || {
+        factor,
+        consensusImportance: 0,
+        totalImportance: 0,
+        supportCount: 0,
+        models: [],
+        formula: meta?.formula,
+        score: meta?.score,
+        ic: meta?.ic,
+      };
+
+      current.consensusImportance += weightedImportance;
+      current.totalImportance += importance;
+
+      if (!current.models.includes(modelName)) {
+        current.models.push(modelName);
+        current.supportCount += 1;
+      }
+
+      if (!current.formula && meta?.formula) current.formula = meta.formula;
+      if (current.score === undefined && meta?.score !== undefined) current.score = meta.score;
+      if (current.ic === undefined && meta?.ic !== undefined) current.ic = meta.ic;
+
+      aggregated.set(factor, current);
+    });
+  });
+
+  return Array.from(aggregated.values())
+    .map((item) => ({
+      factor: item.factor,
+      shortLabel: compactFeatureLabel(item.factor),
+      consensusImportance: Number(item.consensusImportance.toFixed(3)),
+      avgImportance: Number((item.totalImportance / Math.max(item.supportCount, 1)).toFixed(3)),
+      supportCount: item.supportCount,
+      supportRatio: item.supportCount / modelEntries.length,
+      models: item.models,
+      formula: item.formula,
+      score: item.score,
+      ic: item.ic,
+    }))
+    .sort((a, b) => {
+      if (b.consensusImportance !== a.consensusImportance) return b.consensusImportance - a.consensusImportance;
+      if (b.supportCount !== a.supportCount) return b.supportCount - a.supportCount;
+      return b.avgImportance - a.avgImportance;
+    })
+    .slice(0, 8);
+}
+
+function niceUpperBound(value: number, minUpper: number, padding = 1.25) {
+  const raw = Math.max(value * padding, minUpper);
+  if (!Number.isFinite(raw) || raw <= 0) return minUpper;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const normalized = raw / magnitude;
+  const step = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return step * magnitude;
 }
 
 function compressProgressPoints(points: ProgressPoint[], maxPoints = 72) {
@@ -506,6 +754,96 @@ const LogPanel = ({ logs }: { logs: string[] }) => {
   );
 };
 
+const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void }) => {
+  const [report, setReport] = useState<ResearchReport | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    fetchJson<{ report: ResearchReport }>(`/api/autoalpha/research/${runId}`)
+      .then((data) => {
+        if (mounted) setReport(data.report);
+      })
+      .catch((err: Error) => {
+        if (mounted) setError(err.message);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [runId]);
+
+  const card = report?.factor_card;
+  const metrics = card?.metrics || {};
+  const diagnostics = card?.diagnostics || {};
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" onClick={onClose}>
+      <div className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-[28px] border border-border/50 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Factor Card</div>
+            <div className="mt-2 text-xl font-semibold text-foreground">{runId}</div>
+          </div>
+          <button onClick={onClose} className="rounded-full border border-border/60 px-3 py-1 text-xs text-foreground transition-colors hover:bg-slate-50">
+            关闭
+          </button>
+        </div>
+        {error ? <div className="rounded-2xl bg-red-50 p-4 text-sm text-red-600">{error}</div> : null}
+        {!report && !error ? <div className="text-sm text-muted-foreground">Factor Card 加载中...</div> : null}
+        {report ? (
+          <div className="space-y-4">
+            <div className="rounded-3xl border border-border/50 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-lg font-semibold text-foreground">{card?.title || card?.run_id || runId}</div>
+                  {card?.theme ? <div className="mt-1 text-sm text-muted-foreground">{card.theme}</div> : null}
+                </div>
+                {card?.status ? (
+                  <div className={`rounded-full px-3 py-1 text-xs font-semibold ${card.status === 'PASS' ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                    {card.status}
+                  </div>
+                ) : null}
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                {[
+                  ['Score', metrics.Score],
+                  ['IC', metrics.IC],
+                  ['IR', metrics.IR],
+                  ['TVR', metrics.tvr ?? metrics.TVR],
+                ].map(([label, value]) => (
+                  <div key={String(label)} className="rounded-2xl bg-white p-3">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
+                    <div className="mt-2 text-lg font-semibold text-foreground">{formatNumber(Number(value || 0), label === 'TVR' ? 1 : 3)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {report.formula ? (
+              <div className="rounded-3xl border border-border/50 bg-slate-50 p-4">
+                <div className="text-sm font-medium text-foreground">公式</div>
+                <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{report.formula}</div>
+              </div>
+            ) : null}
+            {Object.keys(diagnostics).length ? (
+              <div className="rounded-3xl border border-border/50 bg-slate-50 p-4">
+                <div className="text-sm font-medium text-foreground">诊断摘要</div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  {Object.entries(diagnostics).slice(0, 8).map(([key, value]) => (
+                    <div key={key} className="rounded-2xl bg-white p-3">
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{key}</div>
+                      <div className="mt-2 break-words text-sm text-foreground">{typeof value === 'object' ? JSON.stringify(value) : String(value)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
 export const AutoAlphaPage: React.FC = () => {
   const [status, setStatus] = useState<LoopStatus | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgePayload | null>(null);
@@ -513,14 +851,15 @@ export const AutoAlphaPage: React.FC = () => {
   const [modelLab, setModelLab] = useState<ModelLabPayload | null>(null);
   const [inspirations, setInspirations] = useState<InspirationPayload | null>(null);
   const [rounds, setRounds] = useState(10);
-  const [ideas, setIdeas] = useState(3);
+  const [ideas, setIdeas] = useState(4);
   const [days, setDays] = useState(0);
-  const [targetValid, setTargetValid] = useState(100);
+  const [targetValid, setTargetValid] = useState(0);
   const [promptTitle, setPromptTitle] = useState('');
   const [promptInput, setPromptInput] = useState('');
   const [promptBusy, setPromptBusy] = useState(false);
   const [manualBusy, setManualBusy] = useState(false);
   const [manualFactor, setManualFactor] = useState<ManualFactor | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [pageMessage, setPageMessage] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -550,10 +889,10 @@ export const AutoAlphaPage: React.FC = () => {
     fetchJson<RuntimeConfigPayload>('/api/system/config')
       .then((cfg) => {
         const env = cfg.env || {};
-        setRounds(Number(env.AUTOALPHA_DEFAULT_ROUNDS || 0));
+        setRounds(Number(env.AUTOALPHA_DEFAULT_ROUNDS || 10));
         setIdeas(Number(env.AUTOALPHA_DEFAULT_IDEAS || 4));
         setDays(Number(env.AUTOALPHA_DEFAULT_DAYS || 0));
-        setTargetValid(Number(env.AUTOALPHA_DEFAULT_TARGET_VALID || 100));
+        setTargetValid(Number(env.AUTOALPHA_DEFAULT_TARGET_VALID || 0));
       })
       .catch(() => {});
 
@@ -570,15 +909,43 @@ export const AutoAlphaPage: React.FC = () => {
     [knowledge, factors, status]
   );
   const progressChartPoints = useMemo(
-    () =>
-      progressPoints.map((point) => ({
+    () => {
+      const firstTs = new Date(progressPoints[0]?.timestamp || '').getTime();
+      return progressPoints.map((point) => {
+        const currentTs = new Date(point.timestamp || '').getTime();
+        const elapsedHours =
+          Number.isFinite(firstTs) && Number.isFinite(currentTs) && currentTs > firstTs
+            ? (currentTs - firstTs) / 3_600_000
+            : 0;
+        return {
         ...point,
         pass_rate: point.tested > 0 ? Number(((point.passing / point.tested) * 100).toFixed(2)) : 0,
-      })),
+          generation_efficiency: elapsedHours > 0 ? Number((point.passing / elapsedHours).toFixed(2)) : 0,
+        };
+      });
+    },
     [progressPoints]
   );
+  const passingAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.passing), 0), 60);
+  const passRateAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.pass_rate), 0), 5);
+  const efficiencyAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.generation_efficiency), 0), 5);
   const latestModelLab = modelLab?.latest ?? null;
   const modelLabCurve = buildMergedModelCurves(latestModelLab?.models);
+  const modelLabDrawdownCurve = buildMergedDrawdownCurves(latestModelLab?.models);
+  const bestModelPayload = latestModelLab?.best_model ? latestModelLab.models?.[latestModelLab.best_model] : undefined;
+  const predictionComparisonCurve = buildPredictionComparisonCurve(bestModelPayload);
+  const rollingWindowBands = latestModelLab?.windows || [];
+  const featureConsensus = useMemo(
+    () => buildFeatureConsensus(latestModelLab?.models, latestModelLab?.selected_factors),
+    [latestModelLab]
+  );
+  const featureConsensusAxisMax = niceUpperBound(
+    Math.max(...featureConsensus.map((item) => item.consensusImportance), 0),
+    1
+  );
+  const topConsensusFeature = featureConsensus[0];
+  const widestSupportFeature = [...featureConsensus].sort((a, b) => b.supportCount - a.supportCount || b.consensusImportance - a.consensusImportance)[0];
+  const bestModelTopFeature = bestModelPayload?.top_features?.[0];
 
   const statusData = Object.entries(knowledge?.status_breakdown ?? {}).map(([name, value]) => ({
     name,
@@ -643,7 +1010,7 @@ export const AutoAlphaPage: React.FC = () => {
       setInspirations(data);
       setPromptTitle('');
       setPromptInput('');
-      setPageMessage('灵感已写入 AutoAlpha 灵感库，并会自动进入后续挖掘上下文。');
+      setPageMessage('灵感已写入 AutoAlpha Ideas，并会自动进入后续挖掘上下文。');
     } catch (error: any) {
       alert(error.message || '写入灵感失败');
     } finally {
@@ -686,11 +1053,6 @@ export const AutoAlphaPage: React.FC = () => {
     }
   };
 
-  const balanceDonutData = [
-    { name: '已用', value: balance?.used ?? 0, fill: COLORS.used },
-    { name: '剩余', value: Math.max(balance?.remaining ?? 0, 0), fill: COLORS.remaining },
-  ];
-
   return (
     <div className="min-w-0 max-w-full space-y-6 overflow-x-hidden pb-10">
       <Panel
@@ -710,7 +1072,7 @@ export const AutoAlphaPage: React.FC = () => {
           <StatCard label="已测试因子" value={String(status?.total_tested ?? 0)} helper="累计知识库记录" />
           <StatCard label="通过 Gate" value={String(status?.total_passing ?? 0)} helper={`通过率 ${formatPercent(knowledge?.pass_rate ?? 0)}`} accent="bg-emerald-50" />
           <StatCard label="最佳 Score" value={formatNumber(status?.best_score ?? 0, 2)} helper="按云端一致口径显示" accent="bg-sky-50" />
-          <StatCard label="Prompt 灵感" value={String(inspirations?.count ?? 0)} helper="Prompt / URL / 目录文件" accent="bg-violet-50" />
+      <StatCard label="Ideas" value={String(inspirations?.count ?? 0)} helper="Manual / Paper / LLM / Future" accent="bg-violet-50" />
           <StatCard label="Rolling 窗口" value={String(latestModelLab?.window_count ?? 0)} helper={latestModelLab ? `${latestModelLab.best_model} 最优` : '等待实验结果'} accent="bg-amber-50" />
         </div>
       </Panel>
@@ -730,442 +1092,94 @@ export const AutoAlphaPage: React.FC = () => {
         </div>
       ) : null}
 
-      <Panel
-        title="额度包与成本"
-        subtitle="按真实额度包口径展示，因子成本单独成行，避免数字拥挤。"
-        right={<div className={`rounded-full bg-emerald-500/10 px-4 py-2 text-sm font-medium ${quotaTone(balance?.quota_status ?? 'healthy')}`}>{balance?.quota_status ?? 'healthy'}</div>}
-        className="overflow-hidden"
-      >
-        <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-          <div className="min-w-0 overflow-hidden rounded-[28px] bg-[linear-gradient(135deg,#0b3d30_0%,#0f6b53_58%,#138163_100%)] p-5 text-white shadow-[0_22px_70px_rgba(15,118,110,0.18)] md:p-6">
-            <div className="inline-flex items-center rounded-full border border-white/20 bg-white/12 px-4 py-2 text-sm font-medium text-emerald-50">
-              <Sparkles className="mr-2 h-4 w-4" />
-              API Credit
-            </div>
-            <div className="mt-6 text-4xl font-semibold leading-none tracking-tight text-white md:text-5xl">额度包</div>
-            <div className="mt-6 min-w-0 break-words text-[clamp(2rem,5vw,4.5rem)] font-semibold leading-none text-white">
-              {formatMoney(balance?.remaining ?? 0)}
-              <span className="ml-2 text-[clamp(1.1rem,2vw,1.8rem)] text-emerald-50/90">/ {formatMoney(balance?.total_quota ?? 0)}</span>
-            </div>
-            <div className="mt-5 rounded-3xl bg-white/12 p-4">
-              <div className="mb-2 flex items-center justify-between text-sm text-emerald-50">
-                <span>剩余额度</span>
-                <span>{formatPercent(balance?.remaining_pct ?? 0)}</span>
-              </div>
-              <div className="h-4 overflow-hidden rounded-full bg-white/20">
-                <div className="h-full rounded-full bg-emerald-300" style={{ width: `${balance?.remaining_pct ?? 0}%` }} />
-              </div>
-            </div>
-          </div>
-
-          <div className="grid min-w-0 gap-4">
-            <div className="grid min-w-0 gap-4 md:grid-cols-3">
-              <StatCard label="总额度" value={formatMoney(balance?.total_quota ?? 0)} helper="真实额度包口径" valueClassName="whitespace-nowrap text-[clamp(1.5rem,2vw,2.35rem)] tabular-nums" />
-              <StatCard label="已用额度" value={formatMoney(balance?.used ?? 0)} helper={`${formatPercent(balance?.used_pct ?? 0)} 已使用`} accent="bg-orange-50" valueClassName="whitespace-nowrap text-[clamp(1.5rem,2vw,2.35rem)] tabular-nums" />
-              <StatCard label="剩余额度" value={formatMoney(balance?.remaining ?? 0)} helper={`${formatPercent(balance?.remaining_pct ?? 0)} 剩余`} accent="bg-emerald-50" valueClassName="whitespace-nowrap text-[clamp(1.5rem,2vw,2.35rem)] tabular-nums" />
-            </div>
-
-            <div className="grid min-w-0 gap-3">
-              <StatCard label="因子成本" value={formatMoney(balance?.avg_cost_per_factor ?? 0)} helper={`${formatInteger(balance?.avg_tokens_per_factor ?? 0)} tokens / 因子`} accent="bg-sky-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.8vw,2rem)] tabular-nums" />
-              <StatCard label="有效因子成本" value={formatMoney(balance?.avg_cost_per_valid_factor ?? 0)} helper={`${formatInteger(balance?.avg_tokens_per_valid_factor ?? 0)} tokens / 通过因子`} accent="bg-violet-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.8vw,2rem)] tabular-nums" />
-            </div>
-
-            <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1.28fr)]">
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="h-52">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={balanceDonutData} dataKey="value" nameKey="name" innerRadius={52} outerRadius={82} paddingAngle={4} stroke="none">
-                        {balanceDonutData.map((item) => (
-                          <Cell key={item.name} fill={item.fill} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => formatMoney(Number(value || 0))} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="-mt-2 text-center">
-                  <div className="text-xs uppercase tracking-[0.22em] text-muted-foreground">额度占用</div>
-                  <div className="mt-2 text-4xl font-semibold text-foreground">{formatPercent(balance?.used_pct ?? 0)}</div>
-                </div>
-              </div>
-
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-2 flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">使用百分比</span>
-                  <span className="font-medium text-foreground">{formatPercent(balance?.used_pct ?? 0)}</span>
-                </div>
-                <Progress value={balance?.used_pct ?? 0} />
-                <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
-                  <span>已用 {formatPercent(balance?.used_pct ?? 0)}</span>
-                  <span>剩余 {formatPercent(balance?.remaining_pct ?? 0)}</span>
-                </div>
-                <div className="mt-5 grid gap-3 md:grid-cols-3">
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-xs text-muted-foreground">实际调用</div>
-                    <div className="mt-2 text-xl font-semibold text-foreground">{formatInteger(balance?.total_factors ?? 0)} 次</div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-xs text-muted-foreground">通过率</div>
-                    <div className="mt-2 text-xl font-semibold text-foreground">{formatPercent(balance?.pass_rate ?? 0)}</div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-xs text-muted-foreground">Token 消耗</div>
-                    <div className="mt-2 text-xl font-semibold text-foreground">{formatInteger(balance?.est_total_tokens ?? 0)}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Panel>
-
-      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+      <div className="grid min-w-0 items-start gap-6 xl:grid-cols-2">
         <Panel
-          title="Prompt Lab"
-          subtitle="现在可以直接在 AutoAlpha 页面输入文字链接或纯提示词。内容会落到 AutoAlpha 目录里的灵感库，并自动进入后续因子挖掘上下文。"
-          right={(
-            <div className="rounded-full bg-slate-100 px-4 py-2 text-sm text-slate-600">
-              <BrainCircuit className="mr-2 inline h-4 w-4" />
-              {inspirations?.count ?? 0} 条灵感
-            </div>
-          )}
+          title="额度包与成本"
+          subtitle="本页按第三方订阅接口返回的原始额度口径展示；换算关系为 $2 额度约对应 ¥1 实际中转消费。"
+          right={<div className={`rounded-full bg-emerald-500/10 px-4 py-2 text-sm font-medium ${quotaTone(balance?.quota_status ?? 'healthy')}`}>{balance?.quota_status ?? 'healthy'}</div>}
+          className="h-full"
         >
-          <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(260px,0.65fr)]">
-            <div className="min-w-0 space-y-4">
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="grid gap-4">
-                  <label>
-                    <div className="text-xs text-muted-foreground">标题（可选）</div>
-                    <input
-                      value={promptTitle}
-                      onChange={(event) => setPromptTitle(event.target.value)}
-                      placeholder="例如：盘中流动性枯竭 / 某篇文章链接"
-                      className="mt-2 w-full rounded-2xl border border-border/60 bg-slate-50 px-4 py-3 text-sm outline-none"
-                    />
-                  </label>
-                  <label>
-                    <div className="text-xs text-muted-foreground">Prompt / 链接 / DSL</div>
-                    <textarea
-                      value={promptInput}
-                      onChange={(event) => setPromptInput(event.target.value)}
-                      placeholder="输入研究灵感、文章链接、市场观察，或直接输入一段 DSL。保存后会进入 AutoAlpha 灵感库。"
-                      className="mt-2 h-40 w-full rounded-2xl border border-border/60 bg-slate-50 px-4 py-3 text-sm outline-none"
-                    />
-                  </label>
+          {(() => {
+            const pct = Math.min(balance?.used_pct ?? 0, 100);
+            const barColor =
+              (balance?.quota_status ?? 'healthy') === 'healthy' ? 'bg-emerald-500' :
+              (balance?.quota_status) === 'warning' ? 'bg-amber-400' :
+              (balance?.quota_status) === 'critical' ? 'bg-orange-500' : 'bg-red-500';
+            return (
+              <div className="mb-4">
+                <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                  <span>额度占用</span>
+                  <span className="tabular-nums font-medium">{formatPercent(pct)} 已使用</span>
                 </div>
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button onClick={handleAddInspiration} disabled={promptBusy} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm text-white transition-colors hover:bg-slate-800 disabled:opacity-50">
-                    {promptBusy ? '处理中...' : '加入灵感库'}
-                  </button>
-                  <button onClick={handleGenerateManualFactor} disabled={manualBusy} className="rounded-2xl border border-border/60 bg-white px-4 py-3 text-sm text-foreground transition-colors hover:bg-slate-50 disabled:opacity-50">
-                    <Wand2 className="mr-2 inline h-4 w-4" />
-                    {manualBusy ? '验证中...' : '立即验证单因子'}
-                  </button>
-                  <button onClick={handleSyncInspirations} disabled={promptBusy} className="rounded-2xl border border-border/60 bg-white px-4 py-3 text-sm text-foreground transition-colors hover:bg-slate-50 disabled:opacity-50">
-                    <FolderSync className="mr-2 inline h-4 w-4" />
-                    同步目录文件
-                  </button>
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                    style={{ width: `${pct}%` }}
+                  />
                 </div>
               </div>
-
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium text-foreground">目录与数据库</div>
-                  <span className="text-[11px] text-muted-foreground">上下文预览</span>
-                </div>
-                <div className="grid gap-2 text-sm">
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div className="min-w-0 rounded-2xl bg-slate-50 p-3">
-                      <div className="text-[11px] text-muted-foreground">Prompt Dir</div>
-                      <div className="mt-1 overflow-x-auto whitespace-nowrap font-mono text-[11px] leading-5 text-foreground">{inspirations?.prompt_dir || '--'}</div>
-                    </div>
-                    <div className="min-w-0 rounded-2xl bg-slate-50 p-3">
-                      <div className="text-[11px] text-muted-foreground">SQLite DB</div>
-                      <div className="mt-1 overflow-x-auto whitespace-nowrap font-mono text-[11px] leading-5 text-foreground">{inspirations?.database_path || '--'}</div>
-                    </div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-[11px] text-muted-foreground">注入 LLM 的上下文预览</div>
-                    <div className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-words pr-2 text-[11px] leading-5 text-foreground">
-                      {inspirations?.prompt_context_preview || '当前没有灵感上下文。'}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="min-w-0 space-y-4">
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                    <Sparkles className="h-4 w-4 text-violet-500" />
-                    最近灵感
-                  </div>
-                  <span className="text-[11px] text-muted-foreground">{inspirations?.count ?? 0} 条</span>
-                </div>
-                <div className="max-h-72 overflow-y-auto space-y-1.5 pr-0.5">
-                  {(inspirations?.items || []).length === 0 ? (
-                    <div className="text-xs text-muted-foreground py-1">还没有灵感记录。</div>
-                  ) : (
-                    inspirations?.items.map((item) => (
-                      <div key={item.id} className="rounded-xl border border-border/40 bg-slate-50/80 px-2.5 py-2">
-                        <div className="flex items-baseline justify-between gap-2">
-                          <div className="truncate text-xs font-medium text-foreground leading-tight">{item.title}</div>
-                          <div className="shrink-0 text-[10px] text-muted-foreground">{formatDateTime(item.created_at)}</div>
-                        </div>
-                        <div className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-slate-600">
-                          {item.summary || truncate(item.content, 80)}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="min-h-[132px] rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                  <FlaskConical className="h-4 w-4 text-sky-500" />
-                  单因子即时验证
-                </div>
-                {!manualFactor ? (
-                  <div className="text-sm text-muted-foreground">输入 Prompt 或 DSL 后，可以在这里直接看到单因子的云端一致口径结果。</div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <div className="text-[11px] text-muted-foreground">Score</div>
-                        <div className="mt-2 text-xl font-semibold text-foreground">{formatNumber(manualFactor.Score ?? 0, 2)}</div>
-                      </div>
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <div className="text-[11px] text-muted-foreground">Cloud TVR</div>
-                        <div className="mt-2 text-xl font-semibold text-foreground">{formatNumber(manualFactor.Turnover ?? 0, 1)}</div>
-                      </div>
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <div className="text-[11px] text-muted-foreground">IC / IR</div>
-                        <div className="mt-2 text-sm font-semibold text-foreground">{formatNumber(manualFactor.IC ?? 0, 3)} / {formatNumber(manualFactor.IR ?? 0, 2)}</div>
-                      </div>
-                      <div className={`rounded-2xl p-3 ${manualFactor.submission_ready_flag ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
-                        <div className="text-[11px]">提交状态</div>
-                        <div className="mt-2 text-sm font-semibold">{manualFactor.submission_ready_flag ? '可直接提交' : '研究候选'}</div>
-                      </div>
-                    </div>
-                    <div className="rounded-2xl bg-slate-50 p-3">
-                      <div className="text-[11px] text-muted-foreground">公式</div>
-                      <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{manualFactor.formula || '--'}</div>
-                    </div>
-                    {manualFactor.submission_path ? (
-                      <div className="rounded-2xl bg-slate-50 p-3">
-                        <div className="text-[11px] text-muted-foreground">提交文件</div>
-                        <div className="mt-2 break-all text-xs text-foreground">{manualFactor.submission_path}</div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            </div>
+            );
+          })()}
+          <div className="grid min-w-0 gap-4 md:grid-cols-3">
+            <StatCard label="总额度" value={formatMoney(balance?.total_quota ?? 0)} helper="真实额度包口径" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
+            <StatCard label="已用额度" value={formatMoney(balance?.used ?? 0)} helper={`${formatPercent(balance?.used_pct ?? 0)} 已使用`} accent="bg-orange-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
+            <StatCard label="剩余额度" value={formatMoney(balance?.remaining ?? 0)} helper={`${formatPercent(balance?.remaining_pct ?? 0)} 剩余`} accent="bg-emerald-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
+            <StatCard label="因子成本" value={formatMoney(balance?.avg_cost_per_factor ?? 0)} helper={`${formatInteger(balance?.avg_tokens_per_factor ?? 0)} tokens / 因子`} accent="bg-sky-50" valueClassName="whitespace-nowrap text-[clamp(1.25rem,1.7vw,1.9rem)] tabular-nums" />
+            <StatCard label="有效因子成本" value={formatMoney(balance?.avg_cost_per_valid_factor ?? 0)} helper={`${formatInteger(balance?.avg_tokens_per_valid_factor ?? 0)} tokens / 通过因子`} accent="bg-violet-50" valueClassName="whitespace-nowrap text-[clamp(1.25rem,1.7vw,1.9rem)] tabular-nums" />
+            <StatCard label="Token 消耗" value={formatInteger(balance?.est_total_tokens ?? 0)} helper={`${formatInteger(balance?.total_factors ?? 0)} 次调用 / 通过率 ${formatPercent(balance?.pass_rate ?? 0)}`} accent="bg-slate-50" valueClassName="whitespace-nowrap text-[clamp(1.25rem,1.7vw,1.9rem)] tabular-nums" />
           </div>
         </Panel>
 
-        <Panel title="循环控制与实时日志" subtitle="直接启动全量数据挖掘；rounds=0 表示持续运行，直到达到目标有效因子数或手动停止。">
-          <div className="grid min-w-0 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
-              <div className="text-xs text-muted-foreground">轮数 rounds</div>
-              <input type="number" min={0} max={2000} value={rounds} onChange={(event) => setRounds(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
-              <div className="mt-2 text-[11px] text-muted-foreground">0 表示长跑模式</div>
-            </label>
-            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
-              <div className="text-xs text-muted-foreground">每轮 ideas</div>
-              <input type="number" min={1} max={20} value={ideas} onChange={(event) => setIdeas(Number(event.target.value))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
-            </label>
-            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
-              <div className="text-xs text-muted-foreground">交易日 days</div>
-              <input type="number" min={0} value={days} onChange={(event) => setDays(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
-              <div className="mt-2 text-[11px] text-muted-foreground">输入 0 即使用全量数据</div>
-            </label>
-            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
-              <div className="text-xs text-muted-foreground">目标有效因子</div>
-              <input type="number" min={0} max={1000} value={targetValid} onChange={(event) => setTargetValid(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
-              <div className="mt-2 text-[11px] text-muted-foreground">0 表示不设目标</div>
-            </label>
-          </div>
-
-          <div className="mt-4 grid min-w-0 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(132px,180px)] xl:grid-cols-[minmax(0,1fr)_180px]">
-            <button onClick={handleStart} disabled={isRunning} className="rounded-3xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">
-              {isRunning ? '挖掘中...' : '启动全量挖掘'}
-            </button>
-            <button onClick={handleStop} disabled={!isRunning} className="rounded-3xl border border-red-300 bg-red-50 px-4 py-3 text-sm font-medium text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50">
-              停止循环
-            </button>
-          </div>
-
-          <div className="mt-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
-            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '状态轮询间隔 4 秒'} valueClassName="text-xl" />
-            <StatCard label="云端一致说明" value="TVR / Score 已对齐" helper="submission-like 提交评分链路" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
-          </div>
-
-          <div className="mt-4 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-3 sm:p-4">
-            <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
-              <div className="text-sm font-medium text-foreground">实时日志</div>
-              <div className="shrink-0 text-xs text-muted-foreground">{status?.logs?.slice(-1)[0] ? '实时滚动' : '等待启动'}</div>
-            </div>
-            <LogPanel logs={status?.logs ?? []} />
-          </div>
-        </Panel>
-      </div>
-
-      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
-        <Panel title="Rolling Model Lab" subtitle="基于当前已获得的有效因子做滚动训练实验：支持 1 个或更多有效因子，半年训练、半年测试、继续向后滚动，并输出线性模型 / LightGBM 的预测效果、PnL 曲线和整体因子 parquet。">
-          <div className="grid min-w-0 gap-4 md:grid-cols-2 2xl:grid-cols-4">
-            <StatCard label="Run ID" value={latestModelLab?.run_id || '--'} helper={latestModelLab ? formatDateTime(latestModelLab.created_at) : '还没有实验'} valueClassName="text-lg" />
-            <StatCard label="选中因子数" value={String(latestModelLab?.selected_factor_count ?? 0)} helper={`目标 ${latestModelLab?.target_valid_count ?? 0}`} accent="bg-violet-50" />
-            <StatCard label="滚动窗口数" value={String(latestModelLab?.window_count ?? 0)} helper={latestModelLab ? `${latestModelLab.train_days}/${latestModelLab.test_days}/${latestModelLab.step_days}` : 'train/test/step'} accent="bg-sky-50" />
-            <StatCard label="最优模型" value={latestModelLab?.best_model || '--'} helper="线性 / LGB 竞赛" accent="bg-emerald-50" />
-          </div>
-
-          <div className="mt-5 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">累计 PnL 曲线</div>
-              <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={modelLabCurve}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <Tooltip />
-                    {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
+        <Panel title="研究进程综述" className="h-full">
+          <div className="grid min-w-0 gap-5">
+            <div className="grid min-w-0 gap-5 xl:grid-cols-2">
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-3 text-sm font-medium text-foreground">测试进度与通过数</div>
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={progressChartPoints}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="timestamp" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisTime} minTickGap={28} />
+                      <YAxis yAxisId="tested" tick={{ fill: '#64748b', fontSize: 11 }} domain={[0, 'dataMax + 5']} />
+                      <YAxis
+                        yAxisId="passing"
+                        orientation="right"
+                        domain={[0, passingAxisMax]}
+                        tick={{ fill: COLORS.passing, fontSize: 11 }}
+                      />
+                      <Tooltip formatter={(value: number) => formatNumber(Number(value), 0)} />
+                      <Legend />
+                      <Area yAxisId="tested" type="monotone" dataKey="tested" name="tested" stroke={COLORS.tested} fill={COLORS.tested} fillOpacity={0.15} />
                       <Line
-                        key={modelName}
+                        yAxisId="passing"
                         type="monotone"
-                        dataKey={modelName}
-                        stroke={[COLORS.pnlA, COLORS.pnlB, COLORS.pnlC][index % 3]}
+                        dataKey="passing"
+                        name="passing"
+                        stroke={COLORS.passing}
                         strokeWidth={3}
                         dot={false}
                       />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
-            </div>
 
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">模型对比</div>
-              <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={modelComparison}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="model" tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <Tooltip />
-                    <Legend />
-                    <Bar dataKey="ic" name="Avg IC" fill={COLORS.ic} radius={[8, 8, 0, 0]} />
-                    <Bar dataKey="rankIc" name="Avg Rank IC" fill={COLORS.histogram} radius={[8, 8, 0, 0]} />
-                    <Bar dataKey="sharpe" name="Sharpe" fill={COLORS.passing} radius={[8, 8, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-5 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                <FileStack className="h-4 w-4 text-sky-500" />
-                入模因子清单
-              </div>
-              <div className="space-y-3">
-                {(latestModelLab?.selected_factors || []).slice(0, 8).map((factor) => (
-                  <div key={factor.run_id} className="rounded-2xl bg-slate-50 p-3">
-                    <div className="flex min-w-0 items-center justify-between gap-3">
-                      <div className="min-w-0 truncate font-mono text-xs text-foreground">{factor.run_id}</div>
-                      <div className="shrink-0 text-xs text-muted-foreground">Score {formatNumber(factor.score, 2)}</div>
-                    </div>
-                    <div className="mt-2 break-words text-xs leading-6 text-slate-700">{truncate(factor.formula, 120)}</div>
-                  </div>
-                ))}
-                {!(latestModelLab?.selected_factors || []).length ? <div className="text-sm text-muted-foreground">还没有滚动实验结果。</div> : null}
-              </div>
-            </div>
-
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                <Sparkles className="h-4 w-4 text-emerald-500" />
-                特征重要性 / 预测摘要
-              </div>
-              <div className="space-y-4">
-                {Object.entries(latestModelLab?.models || {}).map(([modelName, payload]) => (
-                  <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
-                    <div className="flex min-w-0 items-center justify-between gap-3">
-                      <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
-                      <div className="shrink-0 text-xs text-muted-foreground">PnL {formatNumber(payload.total_pnl, 3)}</div>
-                    </div>
-                    <div className="mt-2 grid gap-2 text-[11px] text-slate-600 sm:grid-cols-2 2xl:grid-cols-4">
-                      <div>IC {formatNumber(payload.avg_daily_ic, 4)}</div>
-                      <div>RankIC {formatNumber(payload.avg_daily_rank_ic, 4)}</div>
-                      <div>Sharpe {formatNumber(payload.avg_sharpe, 2)}</div>
-                      <div>Hit {formatPercent(payload.hit_ratio * 100)}</div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {payload.top_features.slice(0, 5).map((item) => (
-                        <span key={`${modelName}-${item.factor}`} className="rounded-full bg-white px-3 py-1 text-[11px] text-slate-700">
-                          {truncate(item.factor, 18)} · {formatNumber(item.importance, 2)}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-                {!(latestModelLab?.models && Object.keys(latestModelLab.models).length) ? <div className="text-sm text-muted-foreground">当前还没有模型实验结果；现在只要有 1 个有效因子，也可以产出模型实验和整体因子输出。</div> : null}
-              </div>
-            </div>
-          </div>
-          {latestModelLab?.ensemble_outputs && Object.keys(latestModelLab.ensemble_outputs).length ? (
-            <div className="mt-5 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">整体因子输出</div>
-              <div className="grid min-w-0 gap-3 md:grid-cols-2">
-                {Object.entries(latestModelLab.ensemble_outputs).map(([modelName, path]) => (
-                  <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{modelName}</div>
-                    <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{path}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </Panel>
-
-        <Panel title="研究进程综述">
-          <div className="grid min-w-0 gap-5">
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">测试进度与通过数</div>
-              <div className="h-56">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={progressChartPoints}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="timestamp" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisTime} minTickGap={28} />
-                    <YAxis yAxisId="count" tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <YAxis
-                      yAxisId="rate"
-                      orientation="right"
-                      domain={[0, 10]}
-                      tick={{ fill: '#92400e', fontSize: 11 }}
-                      tickFormatter={(value) => `${Number(value).toFixed(0)}%`}
-                    />
-                    <Tooltip formatter={(value: number, name: string) => (name === '通过比例' ? `${formatNumber(Number(value), 2)}%` : formatNumber(Number(value), 0))} />
-                    <Legend />
-                    <Area yAxisId="count" type="monotone" dataKey="tested" name="tested" stroke={COLORS.tested} fill={COLORS.tested} fillOpacity={0.15} />
-                    <Area yAxisId="count" type="monotone" dataKey="passing" name="passing" stroke={COLORS.passing} fill={COLORS.passing} fillOpacity={0.15} />
-                    <Line
-                      yAxisId="rate"
-                      type="monotone"
-                      dataKey="pass_rate"
-                      name="通过比例"
-                      stroke={COLORS.passRate}
-                      strokeWidth={2}
-                      strokeDasharray="6 5"
-                      dot={false}
-                    />
-                  </ComposedChart>
-                </ResponsiveContainer>
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-3 text-sm font-medium text-foreground">通过比例与生成效率</div>
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={progressChartPoints} margin={{ top: 12, right: 18, bottom: 8, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="timestamp" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisTime} minTickGap={28} />
+                      <YAxis yAxisId="rate" domain={[0, passRateAxisMax]} tick={{ fill: COLORS.passRate, fontSize: 11 }} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} />
+                      <YAxis yAxisId="efficiency" orientation="right" domain={[0, efficiencyAxisMax]} tick={{ fill: COLORS.efficiency, fontSize: 11 }} />
+                      <Tooltip formatter={(value: number, name: string) => (name === '通过比例' ? `${formatNumber(Number(value), 2)}%` : `${formatNumber(Number(value), 2)} / 小时`)} />
+                      <Legend />
+                      <Line yAxisId="rate" type="monotone" dataKey="pass_rate" name="通过比例" stroke={COLORS.passRate} strokeWidth={3} dot={false} />
+                      <Line yAxisId="efficiency" type="monotone" dataKey="generation_efficiency" name="平均每小时有效因子" stroke={COLORS.efficiency} strokeWidth={3} dot={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -1233,8 +1247,535 @@ export const AutoAlphaPage: React.FC = () => {
             </div>
           </div>
         </Panel>
+
+        <Panel
+          title="Prompt Lab"
+          subtitle="现在可以直接在 AutoAlpha 页面输入文字链接或纯提示词。内容会落到 AutoAlpha Ideas，并自动进入后续因子挖掘上下文。"
+          right={(
+            <div className="rounded-full bg-slate-100 px-4 py-2 text-sm text-slate-600">
+              <BrainCircuit className="mr-2 inline h-4 w-4" />
+              {inspirations?.count ?? 0} 条灵感
+            </div>
+          )}
+        >
+          <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(260px,0.65fr)]">
+            <div className="min-w-0 space-y-4">
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="grid gap-4">
+                  <label>
+                    <div className="text-xs text-muted-foreground">标题（可选）</div>
+                    <input
+                      value={promptTitle}
+                      onChange={(event) => setPromptTitle(event.target.value)}
+                      placeholder="例如：盘中流动性枯竭 / 某篇文章链接"
+                      className="mt-2 w-full rounded-2xl border border-border/60 bg-slate-50 px-4 py-3 text-sm outline-none"
+                    />
+                  </label>
+                  <label>
+                    <div className="text-xs text-muted-foreground">Prompt / 链接 / DSL</div>
+                    <textarea
+                      value={promptInput}
+                      onChange={(event) => setPromptInput(event.target.value)}
+                      placeholder="输入研究灵感、文章链接、市场观察，或直接输入一段 DSL。保存后会进入 AutoAlpha Ideas。"
+                      className="mt-2 h-40 w-full rounded-2xl border border-border/60 bg-slate-50 px-4 py-3 text-sm outline-none"
+                    />
+                  </label>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button onClick={handleAddInspiration} disabled={promptBusy} className="rounded-2xl bg-slate-950 px-4 py-3 text-sm text-white transition-colors hover:bg-slate-800 disabled:opacity-50">
+                    {promptBusy ? '处理中...' : '加入 Ideas'}
+                  </button>
+                  <button onClick={handleGenerateManualFactor} disabled={manualBusy} className="rounded-2xl border border-border/60 bg-white px-4 py-3 text-sm text-foreground transition-colors hover:bg-slate-50 disabled:opacity-50">
+                    <Wand2 className="mr-2 inline h-4 w-4" />
+                    {manualBusy ? '验证中...' : '立即验证单因子'}
+                  </button>
+                  <button onClick={handleSyncInspirations} disabled={promptBusy} className="rounded-2xl border border-border/60 bg-white px-4 py-3 text-sm text-foreground transition-colors hover:bg-slate-50 disabled:opacity-50">
+                    <FolderSync className="mr-2 inline h-4 w-4" />
+                    同步目录文件
+                  </button>
+                </div>
+              </div>
+
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium text-foreground">目录与数据库</div>
+                  <span className="text-[11px] text-muted-foreground">上下文预览</span>
+                </div>
+                <div className="grid gap-2 text-sm">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="min-w-0 rounded-2xl bg-slate-50 p-3">
+                      <div className="text-[11px] text-muted-foreground">Prompt Dir</div>
+                      <div className="mt-1 overflow-x-auto whitespace-nowrap font-mono text-[11px] leading-5 text-foreground">{inspirations?.prompt_dir || '--'}</div>
+                    </div>
+                    <div className="min-w-0 rounded-2xl bg-slate-50 p-3">
+                      <div className="text-[11px] text-muted-foreground">SQLite DB</div>
+                      <div className="mt-1 overflow-x-auto whitespace-nowrap font-mono text-[11px] leading-5 text-foreground">{inspirations?.database_path || '--'}</div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-3">
+                    <div className="text-[11px] text-muted-foreground">注入 LLM 的上下文预览</div>
+                    <div className="mt-2 max-h-32 overflow-y-auto whitespace-pre-wrap break-words pr-2 text-[11px] leading-5 text-foreground">
+                      {inspirations?.prompt_context_preview || '当前没有灵感上下文。'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="min-w-0 space-y-4">
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <Sparkles className="h-4 w-4 text-violet-500" />
+                    最近灵感
+                  </div>
+                  <span className="text-[11px] text-muted-foreground">{inspirations?.count ?? 0} 条</span>
+                </div>
+                <div className="max-h-72 overflow-y-auto space-y-1.5 pr-0.5">
+                  {(inspirations?.items || []).length === 0 ? (
+                    <div className="text-xs text-muted-foreground py-1">还没有灵感记录。</div>
+                  ) : (
+                    inspirations?.items.map((item) => (
+                      <div key={item.id} className="rounded-xl border border-border/40 bg-slate-50/80 px-2.5 py-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          {item.source_type === 'paper' && item.source?.startsWith('http') ? (
+                            <a
+                              href={item.source}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="truncate text-xs font-medium leading-tight text-sky-700 underline-offset-2 hover:underline"
+                              title={item.source}
+                            >
+                              {item.title}
+                            </a>
+                          ) : (
+                            <div className="truncate text-xs font-medium text-foreground leading-tight">{item.title}</div>
+                          )}
+                          <div className="shrink-0 text-[10px] text-muted-foreground">{formatDateTime(item.created_at)}</div>
+                        </div>
+                        <div className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-slate-600">
+                          {item.summary || truncate(item.content, 80)}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="min-h-[132px] rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                  <FlaskConical className="h-4 w-4 text-sky-500" />
+                  单因子即时验证
+                </div>
+                {!manualFactor ? (
+                  <div className="text-sm text-muted-foreground">输入 Prompt 或 DSL 后，可以在这里直接看到单因子的云端一致口径结果。</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-2xl bg-slate-50 p-3">
+                        <div className="text-[11px] text-muted-foreground">Score</div>
+                        <div className="mt-2 text-xl font-semibold text-foreground">{formatNumber(manualFactor.Score ?? 0, 2)}</div>
+                      </div>
+                      <div className="rounded-2xl bg-slate-50 p-3">
+                        <div className="text-[11px] text-muted-foreground">Cloud TVR</div>
+                        <div className="mt-2 text-xl font-semibold text-foreground">{formatNumber(manualFactor.Turnover ?? 0, 1)}</div>
+                      </div>
+                      <div className="rounded-2xl bg-slate-50 p-3">
+                        <div className="text-[11px] text-muted-foreground">IC / IR</div>
+                        <div className="mt-2 text-sm font-semibold text-foreground">{formatNumber(manualFactor.IC ?? 0, 3)} / {formatNumber(manualFactor.IR ?? 0, 2)}</div>
+                      </div>
+                      <div className={`rounded-2xl p-3 ${manualFactor.submission_ready_flag ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                        <div className="text-[11px]">提交状态</div>
+                        <div className="mt-2 text-sm font-semibold">{manualFactor.submission_ready_flag ? '可直接提交' : '研究候选'}</div>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <div className="text-[11px] text-muted-foreground">公式</div>
+                      <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{manualFactor.formula || '--'}</div>
+                    </div>
+                    {manualFactor.submission_path ? (
+                      <div className="rounded-2xl bg-slate-50 p-3">
+                        <div className="text-[11px] text-muted-foreground">提交文件</div>
+                        <div className="mt-2 break-all text-xs text-foreground">{manualFactor.submission_path}</div>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </Panel>
+
+        <Panel title="循环控制与实时日志" subtitle="直接启动全量数据挖掘；rounds=0 表示持续运行，直到达到目标有效因子数或手动停止。" className="h-full">
+          <div className="grid min-w-0 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
+              <div className="text-xs text-muted-foreground">轮数 rounds</div>
+              <input type="number" min={0} max={2000} value={rounds} onChange={(event) => setRounds(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <div className="mt-2 text-[11px] text-muted-foreground">0 表示长跑模式</div>
+            </label>
+            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
+              <div className="text-xs text-muted-foreground">每轮 ideas</div>
+              <input type="number" min={1} max={20} value={ideas} onChange={(event) => setIdeas(Number(event.target.value))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+            </label>
+            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
+              <div className="text-xs text-muted-foreground">交易日 days</div>
+              <input type="number" min={0} value={days} onChange={(event) => setDays(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <div className="mt-2 text-[11px] text-muted-foreground">输入 0 即使用全量数据</div>
+            </label>
+            <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
+              <div className="text-xs text-muted-foreground">目标有效因子</div>
+              <input type="number" min={0} max={1000} value={targetValid} onChange={(event) => setTargetValid(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
+              <div className="mt-2 text-[11px] text-muted-foreground">0 表示不设目标</div>
+            </label>
+          </div>
+
+          <div className="mt-4 grid min-w-0 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(132px,180px)] xl:grid-cols-[minmax(0,1fr)_180px]">
+            <button onClick={handleStart} disabled={isRunning} className="rounded-3xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">
+              {isRunning ? '挖掘中...' : '启动全量挖掘'}
+            </button>
+            <button onClick={handleStop} disabled={!isRunning} className="rounded-3xl border border-red-300 bg-red-50 px-4 py-3 text-sm font-medium text-red-600 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50">
+              停止循环
+            </button>
+          </div>
+
+          <div className="mt-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
+            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '状态轮询间隔 4 秒'} valueClassName="text-xl" />
+            <StatCard label="云端一致说明" value="TVR / Score 已对齐" helper="submission-like 提交评分链路" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
+          </div>
+
+          <div className="mt-4 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-3 sm:p-4">
+            <div className="mb-2 flex min-w-0 items-center justify-between gap-3">
+              <div className="text-sm font-medium text-foreground">实时日志</div>
+              <div className="shrink-0 text-xs text-muted-foreground">{status?.logs?.slice(-1)[0] ? '实时滚动' : '等待启动'}</div>
+            </div>
+            <LogPanel logs={status?.logs ?? []} />
+          </div>
+        </Panel>
       </div>
 
+      <div className="grid min-w-0 gap-6">
+        <Panel title="Rolling Model Lab" subtitle="基于当前已获得的有效因子做滚动训练实验：支持 1 个或更多有效因子，半年训练、半年测试、继续向后滚动，并输出线性模型 / LightGBM 的预测效果、PnL 曲线和整体因子 parquet。">
+          <div className="grid min-w-0 gap-4 md:grid-cols-2 2xl:grid-cols-4">
+            <StatCard label="Run ID" value={latestModelLab?.run_id || '--'} helper={latestModelLab ? formatDateTime(latestModelLab.created_at) : '还没有实验'} valueClassName="text-lg" />
+            <StatCard label="选中因子数" value={String(latestModelLab?.selected_factor_count ?? 0)} helper={`目标 ${latestModelLab?.target_valid_count ?? 0}`} accent="bg-violet-50" />
+            <StatCard label="滚动窗口数" value={String(latestModelLab?.window_count ?? 0)} helper={latestModelLab ? `${latestModelLab.train_days}/${latestModelLab.test_days}/${latestModelLab.step_days}` : 'train/test/step'} accent="bg-sky-50" />
+            <StatCard label="最优模型" value={latestModelLab?.best_model || '--'} helper="线性 / LGB 竞赛" accent="bg-emerald-50" />
+          </div>
+
+          <div className="mt-5 grid min-w-0 gap-5">
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 text-sm font-medium text-foreground">真实策略累计 PnL 曲线</div>
+              <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                这里改成了和预测多空分组一致的真实多空组合口径：每日做多预测最高分组、做空最低分组，并在上方同步展示对应回撤。
+              </div>
+              <div className="space-y-3">
+                <div className="h-[150px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart syncId="model-lab-pnl" data={modelLabDrawdownCurve} margin={{ top: 8, right: 28, bottom: 4, left: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" hide />
+                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
+                      <Legend />
+                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
+                        <Line
+                          key={`dd-${modelName}`}
+                          type="monotone"
+                          dataKey={modelName}
+                          name={`${modelName} 回撤`}
+                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
+                          strokeWidth={2}
+                          dot={false}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart syncId="model-lab-pnl" data={modelLabCurve} margin={{ top: 12, right: 28, bottom: 18, left: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatRollingDate} minTickGap={28} />
+                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
+                      <Legend />
+                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
+                        <Line
+                          key={modelName}
+                          type="monotone"
+                          dataKey={modelName}
+                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
+                          strokeWidth={2.5}
+                          dot={false}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 text-sm font-medium text-foreground">Rolling 预测时序对比</div>
+              <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                预测多空差已按实际多空收益做均值与波动对齐，背景分段覆盖全部 rolling test 窗口。
+              </div>
+              <div className="h-[420px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={predictionComparisonCurve} margin={{ top: 12, right: 28, bottom: 18, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatRollingDate} minTickGap={28} />
+                    <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <Tooltip
+                      labelFormatter={(value) => formatRollingDate(String(value))}
+                      formatter={(value: number, name: string) => [
+                        formatNumber(Number(value), name === '标的平均收益' ? 4 : 4),
+                        name,
+                      ]}
+                    />
+                    <Legend />
+                    {rollingWindowBands.map((window, index) => (
+                      <ReferenceArea
+                        key={`window-${window.window_id}`}
+                        x1={window.test_start}
+                        x2={window.test_end}
+                        fill={index % 2 === 0 ? '#dbeafe' : '#dcfce7'}
+                        fillOpacity={0.15}
+                        strokeOpacity={0}
+                      />
+                    ))}
+                    <Line type="monotone" dataKey="predicted_spread_display" name="预测多空差" stroke={COLORS.pnlB} strokeWidth={2.5} dot={false} />
+                    <Line type="monotone" dataKey="realized_spread" name="实际多空收益" stroke={COLORS.pnlA} strokeWidth={2.5} dot={false} />
+                    <Line type="monotone" dataKey="mean_return" name="标的平均收益" stroke="#94a3b8" strokeWidth={1.5} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 text-sm font-medium text-foreground">模型 IC 对比</div>
+              <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                这里只保留模型间的 Avg IC 和 Avg Rank IC，对比信号强度与排序稳定性。
+              </div>
+              <div className="h-[380px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={modelComparison} margin={{ top: 12, right: 28, bottom: 48, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="model" tick={{ fill: '#64748b', fontSize: 11 }} angle={-12} textAnchor="end" height={54} interval={0} />
+                    <YAxis yAxisId="ic" tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <Tooltip />
+                    <Legend />
+                    <Bar yAxisId="ic" dataKey="ic" name="Avg IC" fill={COLORS.ic} radius={[6, 6, 0, 0]} />
+                    <Bar yAxisId="ic" dataKey="rankIc" name="Avg Rank IC" fill={COLORS.histogram} radius={[6, 6, 0, 0]} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-3 text-sm font-medium text-foreground">Sharpe / PnL 对比</div>
+              <div className="h-[360px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={modelComparison} margin={{ top: 12, right: 32, bottom: 48, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis dataKey="model" tick={{ fill: '#64748b', fontSize: 11 }} angle={-12} textAnchor="end" height={54} interval={0} />
+                    <YAxis yAxisId="sharpe" tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis yAxisId="pnl" orientation="right" tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <Tooltip />
+                    <Legend />
+                    <Bar yAxisId="sharpe" dataKey="sharpe" name="Sharpe" fill={COLORS.sharpe} radius={[6, 6, 0, 0]} />
+                    <Bar yAxisId="pnl" dataKey="pnl" name="Net PnL" fill={COLORS.netPnl} radius={[6, 6, 0, 0]} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="min-w-0 space-y-5">
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                  <FileStack className="h-4 w-4 text-sky-500" />
+                  入模因子清单
+                </div>
+                <div className="mb-3 text-xs text-muted-foreground">
+                  当前 Model Lab 使用全部有效因子入模；点击 run_id 可直接打开对应因子卡片。
+                </div>
+                <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
+                  {(latestModelLab?.selected_factors || []).map((factor) => (
+                    <div key={factor.run_id} className="rounded-2xl bg-slate-50 p-3">
+                      <div className="flex min-w-0 items-center justify-between gap-3">
+                        <button onClick={() => setSelectedRunId(factor.run_id)} className="min-w-0 truncate text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900">
+                          {factor.run_id}
+                        </button>
+                        <div className="shrink-0 text-xs text-muted-foreground">Score {formatNumber(factor.score, 2)}</div>
+                      </div>
+                      <div className="mt-2 break-words text-xs leading-6 text-slate-700">{truncate(factor.formula, 120)}</div>
+                    </div>
+                  ))}
+                  {!(latestModelLab?.selected_factors || []).length ? <div className="text-sm text-muted-foreground">还没有滚动实验结果。</div> : null}
+                </div>
+              </div>
+
+              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+                <div className="mb-1 flex items-center gap-2 text-sm font-medium text-foreground">
+                  <BrainCircuit className="h-4 w-4 text-violet-500" />
+                  跨模型特征重要性共识
+                </div>
+                <div className="mb-4 text-xs leading-5 text-muted-foreground">
+                  结合各模型的 top features，并按模型表现做轻度加权，筛出同时“高重要性 + 多模型重复出现”的关键入模因子。
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-2xl bg-slate-50 p-3">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">跨模型最重要</div>
+                    <div className="mt-2 text-sm font-semibold text-foreground">{topConsensusFeature ? topConsensusFeature.factor : '--'}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      共识分 {topConsensusFeature ? formatNumber(topConsensusFeature.consensusImportance, 2) : '--'}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-3">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">覆盖模型最多</div>
+                    <div className="mt-2 text-sm font-semibold text-foreground">{widestSupportFeature ? widestSupportFeature.factor : '--'}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {widestSupportFeature ? `${widestSupportFeature.supportCount} 个模型同时使用` : '--'}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-3">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">最佳模型首要特征</div>
+                    <div className="mt-2 text-sm font-semibold text-foreground">{bestModelTopFeature?.factor || '--'}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {latestModelLab?.best_model || '--'} · importance {bestModelTopFeature ? formatNumber(bestModelTopFeature.importance, 2) : '--'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 h-[340px]">
+                  {featureConsensus.length ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={[...featureConsensus].reverse()}
+                        layout="vertical"
+                        margin={{ top: 8, right: 20, bottom: 8, left: 10 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis type="number" domain={[0, featureConsensusAxisMax]} tick={{ fill: '#64748b', fontSize: 11 }} />
+                        <YAxis type="category" dataKey="shortLabel" width={92} tick={{ fill: '#64748b', fontSize: 11 }} />
+                        <Tooltip
+                          formatter={(value: number) => [formatNumber(Number(value), 3), '共识分']}
+                          labelFormatter={(label, payload) => {
+                            const item = payload?.[0]?.payload as FeatureConsensusPoint | undefined;
+                            if (!item) return String(label);
+                            return `${item.factor} | ${item.models.join(' / ')}`;
+                          }}
+                        />
+                        <Bar dataKey="consensusImportance" radius={[0, 8, 8, 0]}>
+                          {([...featureConsensus].reverse()).map((item) => (
+                            <Cell key={item.factor} fill={featureConsensusColor(item.supportRatio)} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="flex h-full items-center justify-center rounded-2xl bg-slate-50 text-sm text-muted-foreground">
+                      当前还没有足够的模型实验结果来汇总特征重要性。
+                    </div>
+                  )}
+                </div>
+
+                {featureConsensus.length ? (
+                  <div className="mt-4 grid gap-3 xl:grid-cols-3">
+                    {featureConsensus.slice(0, 3).map((item, index) => (
+                      <div key={item.factor} className="rounded-2xl border border-border/50 bg-slate-50 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Top {index + 1}</div>
+                          <div className="rounded-full bg-white px-2 py-1 text-[10px] text-slate-600">
+                            {item.supportCount} / {Object.keys(latestModelLab?.models || {}).length} 模型
+                          </div>
+                        </div>
+                        <div className="mt-2">
+                          {item.formula || item.score !== undefined ? (
+                            <button
+                              onClick={() => setSelectedRunId(item.factor)}
+                              className="break-all text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                            >
+                              {item.factor}
+                            </button>
+                          ) : (
+                            <div className="break-all font-mono text-xs font-medium text-foreground">{item.factor}</div>
+                          )}
+                        </div>
+                        <div className="mt-2 text-[11px] leading-5 text-slate-600">
+                          模型结论: {item.models.join(' / ')}
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                          <div>共识分 {formatNumber(item.consensusImportance, 2)}</div>
+                          <div>均值权重 {formatNumber(item.avgImportance, 2)}</div>
+                          <div>Score {item.score !== undefined ? formatNumber(item.score, 2) : '--'}</div>
+                          <div>IC {item.ic !== undefined ? formatNumber(item.ic, 3) : '--'}</div>
+                        </div>
+                        {item.formula ? (
+                          <div className="mt-2 break-words text-[11px] leading-5 text-slate-500">
+                            {truncate(item.formula, 100)}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+                <Sparkles className="h-4 w-4 text-emerald-500" />
+                特征重要性 / 预测摘要
+              </div>
+              <div className="space-y-4">
+                {Object.entries(latestModelLab?.models || {}).map(([modelName, payload]) => (
+                  <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
+                      <div className="shrink-0 text-xs text-muted-foreground">Net PnL {formatNumber(payload.total_pnl, 3)}</div>
+                    </div>
+                    <div className="mt-2 grid gap-2 text-[11px] text-slate-600 sm:grid-cols-2 2xl:grid-cols-4">
+                      <div>IC {formatNumber(payload.avg_daily_ic, 4)}</div>
+                      <div>RankIC {formatNumber(payload.avg_daily_rank_ic, 4)}</div>
+                      <div>Sharpe {formatNumber(payload.avg_sharpe, 2)}</div>
+                      <div>TVR {formatNumber(payload.avg_turnover ?? 0, 3)}</div>
+                      <div>Fee {formatNumber(payload.total_fee ?? 0, 4)}</div>
+                      <div>Hit {formatPercent(payload.hit_ratio * 100)}</div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {payload.top_features.slice(0, 5).map((item) => (
+                        <span key={`${modelName}-${item.factor}`} className="rounded-full bg-white px-3 py-1 text-[11px] text-slate-700">
+                          {truncate(item.factor, 18)} · {formatNumber(item.importance, 2)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {!(latestModelLab?.models && Object.keys(latestModelLab.models).length) ? <div className="text-sm text-muted-foreground">当前还没有模型实验结果；现在只要有 1 个有效因子，也可以产出模型实验和整体因子输出。</div> : null}
+              </div>
+            </div>
+          </div>
+          {latestModelLab?.ensemble_outputs && Object.keys(latestModelLab.ensemble_outputs).length ? (
+            <div className="mt-5 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-3 text-sm font-medium text-foreground">整体因子输出</div>
+              <div className="grid min-w-0 gap-3 md:grid-cols-2">
+                {Object.entries(latestModelLab.ensemble_outputs).map(([modelName, path]) => (
+                  <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
+                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{modelName}</div>
+                    <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{path}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </Panel>
+
+      </div>
+
+      {selectedRunId ? <ResearchModal runId={selectedRunId} onClose={() => setSelectedRunId(null)} /> : null}
     </div>
   );
 };

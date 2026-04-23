@@ -22,21 +22,263 @@ Generation strategy (paper-inspired upgrades):
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
+import urllib3
 import warnings
 from typing import Any, Dict, Iterable, List
 
 import requests
 
 from autoalpha_v2.error_utils import AutoAlphaRuntimeError, as_runtime_error
-from autoalpha_v2.inspiration_db import compose_inspiration_context_with_sources
-from autoalpha_v2.knowledge_base import get_generation_guidance
+from autoalpha_v2.inspiration_db import compose_inspiration_context_with_sources, normalize_source_type
+from autoalpha_v2.idea_cache import get_default_cache
+from autoalpha_v2.knowledge_base import (
+    get_generation_guidance,
+    compose_passing_factors_rag,
+    compose_failure_pattern_summary,
+    find_relevant_experience,
+)
 from runtime_config import get_llm_routing, openai_chat_completions_url, load_runtime_config
 
 warnings.filterwarnings("ignore")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TIMEOUT = 60
+DEFAULT_READ_TIMEOUT = 45
+DEFAULT_CONNECT_TIMEOUT = 8
+PROMPT_TOTAL_CHAR_BUDGET = 7600
+PROMPT_STRICT_CHAR_BUDGET = 5200
+PROMPT_EMERGENCY_CHAR_BUDGET = 3400
+_SECTION_COMPACT_CACHE: Dict[str, str] = {}
+_SECTION_TARGET_CHARS = {
+    "passing_rag": 1100,
+    "failure_summary": 320,
+    "hypothesis_context": 420,
+    "parent_context": 520,
+    "inspiration_text": 520,
+    "exhausted_families": 260,
+    "productive_pairs": 180,
+    "crowded_tokens": 120,
+    "failed_examples": 320,
+    "generation_experience": 420,
+    "relevant_experience": 180,
+    "mode_rules": 260,
+}
+_LLM_COMPACTABLE_SECTIONS = {
+    "passing_rag",
+    "parent_context",
+    "inspiration_text",
+    "generation_experience",
+    "failed_examples",
+}
+
+
+def _runtime_int(cfg: dict[str, str], key: str, default: int) -> int:
+    try:
+        return int(str(cfg.get(key, default) or default).strip())
+    except (TypeError, ValueError):
+        return default
+
+SYSTEM_PROMPT_COMPACT = """\
+You are a senior quantitative alpha researcher for 15-minute A-share equities.
+Return ONE factor as raw JSON only.
+
+Allowed fields:
+open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap
+
+Allowed operators:
+lag, delta, ts_pct_change, ts_mean, ts_ema, ts_std, ts_sum, ts_max, ts_min, ts_median,
+ts_quantile, ts_zscore, ts_rank, ts_minmax_norm, ts_decay_linear, ts_corr, ts_cov,
+ts_skew, ts_kurt, ts_argmax, ts_argmin, cs_rank, cs_zscore, cs_demean, cs_scale,
+cs_winsorize, cs_quantile, cs_neutralize, safe_div, signed_power, abs, sign, neg,
+log, signed_log, sqrt, clip, min_of, max_of, sigmoid, tanh, mean_of, weighted_sum,
+combine_rank, ifelse, gt, ge, lt, le, eq, and_op, or_op, not_op, +, -, *, /
+
+Hard constraints:
+- No future info, no resp, no trading_restriction, no lead, no future_ fields.
+- Positive integer lookbacks only; lag(x,0) forbidden.
+- safe_div denominator must be a series, not a scalar literal.
+- Keep formula compact, usually <= 4 functional layers and <= 2 multiplicative blocks.
+- Outer smoother must be >= 10 bars, e.g. ts_mean(x,10), ts_ema(x,10), ts_decay_linear(x,15).
+
+Research goal:
+- Favor stable, low-turnover, full-coverage factors that can pass IC>0.6, IR>2.5, TVR<330.
+- Good motifs: VWAP reversion, range-location persistence, failed breakout, volume-confirmed continuation,
+  volatility compression/release, exhaustion reversal.
+- Prefer smooth signal core + stabilizer + cross-sectional normalization.
+
+Output JSON keys:
+thought_process, formula, postprocess, lookback_days
+"""
+
+
+def _transport_profile(tier: str) -> tuple[int, int, int]:
+    """
+    Return retries, connect timeout, read timeout for a request tier.
+
+    Relay (vip.aipro.love) has a hard ~60s server-side timeout; Haiku model
+    typically responds in 30-50s with a full prompt.  Timeouts here are the
+    client-side socket limits — set generously above the relay cutoff so we
+    always see the relay error rather than a premature client abort.
+    """
+    cfg = load_runtime_config()
+    connect_timeout = _runtime_int(cfg, "AUTOALPHA_LLM_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT)
+    retries = max(1, _runtime_int(cfg, "AUTOALPHA_LLM_REQUEST_RETRIES", 2))
+    if tier == "cheap":
+        return retries, max(10, connect_timeout), max(55, _runtime_int(cfg, "AUTOALPHA_LLM_CHEAP_READ_TIMEOUT", 55))
+    if tier == "chat":
+        return retries, connect_timeout, max(55, _runtime_int(cfg, "AUTOALPHA_LLM_CHAT_READ_TIMEOUT", 55))
+    return retries, connect_timeout, max(55, _runtime_int(cfg, "AUTOALPHA_LLM_REASONING_READ_TIMEOUT", 90))
+
+
+def _trim_block(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _local_compact_block(name: str, text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+
+    if name in {"passing_rag", "parent_context", "failed_examples"}:
+        lines = []
+        for raw in text.splitlines():
+            line = " ".join(raw.split()).strip()
+            if not line:
+                continue
+            if "formula=" in line:
+                prefix, _, suffix = line.partition("formula=")
+                line = prefix + "formula=" + _trim_block(suffix, 90)
+            lines.append(_trim_block(line, 170))
+        return _trim_block("\n".join(lines), limit)
+
+    units = [part.strip() for part in re.split(r"(?:\n+|(?<=[。.!?])\s+)", text) if part.strip()]
+    compact = " ".join(" ".join(unit.split()) for unit in units)
+    return _trim_block(compact, limit)
+
+
+def _compact_block_with_llm(name: str, text: str, limit: int, *, allow_llm: bool = True) -> str:
+    text = (text or "").strip()
+    if not text or len(text) <= limit:
+        return text
+
+    cache_key = hashlib.sha1(f"{name}|{limit}|{text}".encode("utf-8")).hexdigest()
+    cached = _SECTION_COMPACT_CACHE.get(cache_key)
+    if cached:
+        print(f"[compact] section={name} mode=cache before={len(text)} after={len(cached)}")
+        return cached
+
+    fallback = _local_compact_block(name, text, limit)
+    if (not allow_llm) or name not in _LLM_COMPACTABLE_SECTIONS:
+        print(f"[compact] section={name} mode=local before={len(text)} after={len(fallback)}")
+        _SECTION_COMPACT_CACHE[cache_key] = fallback
+        return fallback
+
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Compress research context without dropping concrete facts. "
+                "Preserve identifiers, metrics, formulas, and explicit do/don't guidance. "
+                "Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Section: {name}\n"
+                f"Target chars: <= {limit}\n"
+                "Rewrite the text densely for reuse inside another LLM prompt. "
+                "Keep all concrete facts, but remove repetition and prose padding.\n"
+                f"Text:\n{_trim_block(text, 5000)}\n\n"
+                'Return JSON: {"compressed": "..."}'
+            ),
+        },
+    ]
+    try:
+        result = call_llm(prompt, max_tokens=min(220, max(120, limit // 3)), tier="cheap")
+        compressed = str(result.get("compressed") or "").strip()
+        if compressed:
+            fallback = _local_compact_block(name, compressed, limit)
+            print(f"[compact] section={name} mode=llm before={len(text)} after={len(fallback)}")
+    except Exception:
+        print(f"[compact] section={name} mode=local-after-llm-fail before={len(text)} after={len(fallback)}")
+
+    _SECTION_COMPACT_CACHE[cache_key] = fallback
+    return fallback
+
+
+def _auto_compact_sections(
+    sections: list[tuple[str, str]],
+    *,
+    system_prompt: str,
+    total_budget: int = PROMPT_TOTAL_CHAR_BUDGET,
+) -> list[str]:
+    rendered = [(name, (text or "").strip()) for name, text in sections if (text or "").strip()]
+    total_chars = len(system_prompt) + sum(len(text) + 2 for _, text in rendered)
+    if total_chars <= total_budget:
+        return [text for _, text in rendered]
+
+    # First pass: cheap, deterministic local compaction on the biggest blocks.
+    order = sorted(
+        range(len(rendered)),
+        key=lambda idx: (
+            -len(rendered[idx][1]),
+            idx,
+        ),
+    )
+    for idx in order:
+        if total_chars <= total_budget:
+            break
+        name, text = rendered[idx]
+        target = min(len(text), _SECTION_TARGET_CHARS.get(name, max(180, len(text) // 2)))
+        if len(text) <= target:
+            continue
+        compacted = _compact_block_with_llm(name, text, target, allow_llm=False)
+        delta = len(text) - len(compacted)
+        if delta > 0:
+            rendered[idx] = (name, compacted)
+            total_chars -= delta
+
+    # Second pass: only in normal mode, allow a tiny number of LLM-assisted compactions.
+    llm_compactions_used = 0
+    allow_llm_compaction = total_budget >= PROMPT_TOTAL_CHAR_BUDGET
+    if total_chars > total_budget and allow_llm_compaction:
+        order = sorted(range(len(rendered)), key=lambda idx: len(rendered[idx][1]), reverse=True)
+        for idx in order:
+            if total_chars <= total_budget or llm_compactions_used >= 1:
+                break
+            name, text = rendered[idx]
+            if name not in _LLM_COMPACTABLE_SECTIONS:
+                continue
+            target = min(len(text), _SECTION_TARGET_CHARS.get(name, max(180, len(text) // 2)))
+            compacted = _compact_block_with_llm(name, text, target, allow_llm=True)
+            delta = len(text) - len(compacted)
+            if delta > 0:
+                rendered[idx] = (name, compacted)
+                total_chars -= delta
+                llm_compactions_used += 1
+
+    if total_chars > total_budget:
+        overflow = total_chars - total_budget
+        order = sorted(range(len(rendered)), key=lambda idx: len(rendered[idx][1]), reverse=True)
+        for idx in order:
+            if overflow <= 0:
+                break
+            name, text = rendered[idx]
+            cut = min(max(80, overflow + 40), max(0, len(text) - 120))
+            if cut <= 0:
+                continue
+            trimmed = _local_compact_block(name, text, len(text) - cut)
+            overflow -= max(0, len(text) - len(trimmed))
+            rendered[idx] = (name, trimmed)
+
+    return [text for _, text in rendered]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System prompt — research goal and DSL specification
@@ -78,7 +320,11 @@ Infix      : +, -, *, /
   persistence, failed breakout, intraday continuation with volume confirmation, volatility
   compression / release, or short-horizon reversal after exhaustion.
 - Prefer a structure like signal core + stabilizer + cross-sectional normalization.
-- Keep turnover controllable: use ts_decay_linear or ts_mean as outer smoothers when needed.
+- TURNOVER IS THE #1 KILLER: outer smoother window MUST be >= 10 bars.
+  ts_decay_linear(x, 2) or ts_decay_linear(x, 3) produces TVR > 700 — FATAL, will not pass.
+  The outermost layer MUST be ts_mean(x, 10), ts_decay_linear(x, 15), or ts_ema(x, 10) or longer.
+  Never use delta(close,1), ts_pct_change(close,1), or sign(delta(x,1)) directly as the core
+  signal without >= 10-bar outer smoothing. Short-window signals MUST be pre-smoothed before rank.
 - New useful patterns: robust baselines via ts_median/ts_quantile, soft clipping via tanh/sigmoid,
   liquidity-neutral residuals via cs_neutralize, and multi-leg blends via mean_of/combine_rank.
 - Aim for diversity versus prior factors. Do not paraphrase existing formulas.
@@ -86,6 +332,7 @@ Infix      : +, -, *, /
 
 # COMPETITION GATES
 IC > 0.6, IR > 2.5, Turnover < 330 (local target), full 2022-2024 date coverage.
+Turnover is the dominant failure — tested formulas average TVR > 700. Fix: use window >= 10.
 
 # OUTPUT
 Return ONLY raw JSON:
@@ -113,12 +360,19 @@ Output ONLY raw JSON:
 """
 
 ARCHETYPES = [
-    "price-vs-vwap intraday mean reversion with smoothing",
-    "close-location / bar-shape persistence with low-turnover stabilization",
-    "short-term continuation confirmed by volume or trade_count expansion",
-    "volatility-compression then release using range and participation changes",
-    "exhaustion reversal after large move and weak follow-through",
-    "relative trend-strength versus recent baseline with cross-sectional normalization",
+    ("mean_reversion", "price-vs-vwap intraday mean reversion with smoothing"),
+    ("range_location", "close-location / bar-shape persistence with low-turnover stabilization"),
+    ("momentum", "short-term continuation confirmed by volume or trade_count expansion"),
+    ("volatility", "volatility-compression then release using range and participation changes"),
+    ("exhaustion", "exhaustion reversal after large move and weak follow-through"),
+    ("volume_signal", "relative trend-strength versus recent baseline with cross-sectional normalization"),
+]
+
+EXPLORATION_ARCHETYPES = [
+    ("mean_reversion", "new paper-derived microstructure anomaly unlike current parents"),
+    ("volume_signal", "LLM brainstormed orthogonal field interaction with low formula correlation"),
+    ("momentum", "futures-market mechanism translated conservatively to equities"),
+    ("volatility", "rare regime filter using range, liquidity, and participation divergence"),
 ]
 
 
@@ -176,6 +430,113 @@ def _candidate_urls(api_base: str) -> List[str]:
     return list(dict.fromkeys(urls))
 
 
+def _oai_headers(api_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Connection": "close",
+        "User-Agent": "AutoAlpha/2.0",
+    }
+
+
+def _collect_openai_stream_lines(lines: Iterable[bytes | str]) -> str:
+    parts: List[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if isinstance(line, bytes):
+            line = line.decode("utf-8", errors="replace")
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if raw == "[DONE]":
+            break
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for choice in obj.get("choices") or []:
+            delta = choice.get("delta") or {}
+            text = delta.get("content")
+            if isinstance(text, list):
+                for item in text:
+                    if isinstance(item, dict) and item.get("text"):
+                        parts.append(str(item["text"]))
+                    elif item:
+                        parts.append(str(item))
+            elif text:
+                parts.append(str(text))
+    return "".join(parts).strip()
+
+
+def _stream_text(
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    *,
+    connect_timeout: int,
+    read_timeout: int,
+) -> str:
+    body = {**payload, "stream": True}
+    session = requests.Session()
+    session.verify = False
+    session.trust_env = False
+    try:
+        with session.post(
+            url,
+            headers=headers,
+            json=body,
+            stream=True,
+            timeout=(connect_timeout, read_timeout),
+        ) as resp:
+            if resp.status_code >= 400:
+                raise as_runtime_error(_extract_error_message(resp), status_code=resp.status_code)
+            content = _collect_openai_stream_lines(resp.iter_lines())
+            if content:
+                return _strip_fences(content)
+            raw = (resp.text or "")[:400]
+            raise AutoAlphaRuntimeError(
+                "LLM 网关返回了空响应，没有生成可用内容。",
+                raw_message=f"url={url} status={resp.status_code} stream_body={raw}",
+                suggestion="稍后重试；如果持续出现，优先检查模型状态、网关兼容性和额度。",
+                error_code="empty_response",
+            )
+    finally:
+        session.close()
+
+
+def _nonstream_text(
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    *,
+    connect_timeout: int,
+    read_timeout: int,
+) -> str:
+    session = requests.Session()
+    session.verify = False
+    session.trust_env = False
+    try:
+        resp = session.post(url, headers=headers, json=payload, timeout=(connect_timeout, read_timeout))
+        if resp.status_code >= 400:
+            raise as_runtime_error(_extract_error_message(resp), status_code=resp.status_code)
+        data = resp.json()
+        if isinstance(data, dict) and data.get("error"):
+            raise as_runtime_error(data.get("error"))
+        content = _extract_content(data)
+        if content:
+            return _strip_fences(content)
+        raise AutoAlphaRuntimeError(
+            "LLM 网关返回了空响应，没有生成可用内容。",
+            raw_message=f"url={url} status={resp.status_code} body={resp.text[:400]}",
+            suggestion="稍后重试；如果持续出现，优先检查模型状态、网关兼容性和额度。",
+            error_code="empty_response",
+        )
+    finally:
+        session.close()
+
+
 def _pick_model(tier: str) -> tuple[str, Dict[str, str]]:
     routing = get_llm_routing()
     if tier == "cheap":
@@ -189,6 +550,7 @@ def _request_text(messages: list[dict[str, str]], *, max_tokens: int, tier: str)
     model, routing = _pick_model(tier)
     api_key = routing.get("api_key", "")
     api_base = routing.get("api_base", "")
+    retries, connect_timeout, read_timeout = _transport_profile(tier)
     if not api_key:
         raise AutoAlphaRuntimeError(
             "当前没有可用的 API Key，无法调用 LLM。",
@@ -197,43 +559,74 @@ def _request_text(messages: list[dict[str, str]], *, max_tokens: int, tier: str)
             error_code="missing_api_key",
         )
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = _oai_headers(api_key)
     payload = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "stream": False,
         "temperature": 0.2,
     }
     last_err: Exception | None = None
-    for _ in range(3):
+    fallback_codes = {"empty_response", "timeout", "network_error"}
+    for attempt in range(retries):
         for url in _candidate_urls(api_base):
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT, verify=False)
-                if resp.status_code >= 400:
-                    raise as_runtime_error(_extract_error_message(resp), status_code=resp.status_code)
-                data = resp.json()
-                if isinstance(data, dict) and data.get("error"):
-                    raise as_runtime_error(data.get("error"))
-                content = _extract_content(data)
-                if content:
-                    return _strip_fences(content)
-                last_err = AutoAlphaRuntimeError(
-                    "LLM 网关返回了空响应，没有生成可用内容。",
-                    raw_message=f"url={url} status={resp.status_code} body={resp.text[:400]}",
-                    suggestion="稍后重试；如果持续出现，优先检查额度、模型状态和网关健康度。",
-                    error_code="empty_response",
+                return _stream_text(
+                    url,
+                    headers,
+                    payload,
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
                 )
+            except AutoAlphaRuntimeError as exc:
+                print(f"[llm] tier={tier} url={url} mode=stream error={exc.error_code}: {exc.friendly_message}")
+                last_err = exc
+                if getattr(exc, "error_code", "") not in fallback_codes:
+                    continue
+                try:
+                    return _nonstream_text(
+                        url,
+                        headers,
+                        payload,
+                        connect_timeout=connect_timeout,
+                        read_timeout=read_timeout,
+                    )
+                except Exception as fallback_exc:
+                    fallback_err = as_runtime_error(fallback_exc)
+                    print(
+                        f"[llm] tier={tier} url={url} mode=nonstream "
+                        f"error={fallback_err.error_code}: {fallback_err.friendly_message}"
+                    )
+                    last_err = fallback_err
             except requests.RequestException as exc:
                 last_err = as_runtime_error(exc)
-            except AutoAlphaRuntimeError as exc:
-                last_err = exc
+                print(
+                    f"[llm] tier={tier} url={url} mode=stream "
+                    f"error={last_err.error_code}: {last_err.friendly_message}"
+                )
+                if getattr(last_err, "error_code", "") in fallback_codes:
+                    try:
+                        return _nonstream_text(
+                            url,
+                            headers,
+                            payload,
+                            connect_timeout=connect_timeout,
+                            read_timeout=read_timeout,
+                        )
+                    except Exception as fallback_exc:
+                        fallback_err = as_runtime_error(fallback_exc)
+                        print(
+                            f"[llm] tier={tier} url={url} mode=nonstream "
+                            f"error={fallback_err.error_code}: {fallback_err.friendly_message}"
+                        )
+                        last_err = fallback_err
             except Exception as exc:
                 last_err = as_runtime_error(exc)
-        time.sleep(2)
+                print(f"[llm] tier={tier} url={url} mode=stream error={last_err.error_code}: {last_err.friendly_message}")
+        if attempt < retries - 1:
+            backoff = 3.0 * (attempt + 1)
+            print(f"[llm] retry attempt={attempt + 1}/{retries} sleeping {backoff:.0f}s before next try")
+            time.sleep(backoff)
 
     if last_err is not None:
         raise last_err
@@ -243,6 +636,11 @@ def _request_text(messages: list[dict[str, str]], *, max_tokens: int, tier: str)
         suggestion="稍后重试；如果持续出现，优先检查额度、模型状态和网关健康度。",
         error_code="empty_response",
     )
+
+
+def _should_retry_with_compact_prompt(exc: Exception) -> bool:
+    code = getattr(as_runtime_error(exc), "error_code", "")
+    return code in {"timeout", "network_error", "empty_response", "bad_json"}
 
 
 def call_llm(messages: list[dict[str, str]], max_tokens: int = 512, tier: str = "reasoning") -> dict:
@@ -349,17 +747,54 @@ def _format_contrast_examples(title: str, items: list[dict[str, Any]] | None) ->
 
 def _format_parent_lines(parents: Iterable[Dict[str, Any]] | None) -> str:
     lines: List[str] = []
-    for parent in list(parents or [])[:5]:
+    for parent in list(parents or [])[:3]:
         lines.append(
             "  formula={formula} | IC={ic} | tvr={tvr} | score={score} | thought={thought}".format(
-                formula=parent.get("formula", ""),
+                formula=_trim_block(parent.get("formula", ""), 140),
                 ic=parent.get("IC", "?"),
                 tvr=parent.get("tvr", parent.get("Turnover", "?")),
                 score=parent.get("score", parent.get("Score", "?")),
-                thought=(parent.get("thought_process") or "")[:120],
+                thought=_trim_block(parent.get("thought_process", ""), 70),
             )
         )
     return "\n".join(lines)
+
+
+def _archetype_weight(
+    archetype_key: str,
+    stats: Dict[str, Dict[str, int]],
+) -> float:
+    bucket = stats.get(archetype_key, {})
+    total = sum(int(v or 0) for v in bucket.values())
+    if total <= 0:
+        return 1.0
+    severe = int(bucket.get("syntax_error", 0) or 0) + int(bucket.get("compute_error", 0) or 0)
+    screened = int(bucket.get("screened_out", 0) or 0)
+    passing = int(bucket.get("passing", 0) or 0)
+    weight = 1.0
+    weight *= max(0.2, 1.0 - 0.8 * (severe / total))
+    weight *= max(0.4, 1.0 - 0.35 * (screened / total))
+    if passing > 0:
+        weight *= 1.0 + min(0.35, 0.12 * passing)
+    return max(0.15, min(weight, 1.5))
+
+
+def _pick_archetype(
+    options: List[tuple[str, str]],
+    idea_index: int,
+    stats: Dict[str, Dict[str, int]],
+) -> tuple[str, str]:
+    ordered = sorted(
+        enumerate(options),
+        key=lambda item: (
+            _archetype_weight(item[1][0], stats),
+            -(sum(int(v or 0) for v in stats.get(item[1][0], {}).values())),
+            -(item[0] == (idea_index % max(1, len(options)))),
+        ),
+        reverse=True,
+    )
+    slot = idea_index % max(1, len(ordered))
+    return ordered[slot][1]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,7 +849,7 @@ def _generate_hypothesis(
         {"role": "user",   "content": "\n\n".join(sections)},
     ]
     try:
-        result = call_llm(messages, max_tokens=280, tier="cheap")
+        result = call_llm(messages, max_tokens=220, tier="cheap")
         if isinstance(result, dict) and result.get("hypothesis"):
             return result
     except Exception:
@@ -442,14 +877,41 @@ def generate_idea(
     """
     cfg = load_runtime_config()
     context_limit = int(cfg.get("AUTOALPHA_PROMPT_CONTEXT_LIMIT", "6") or 6)
+    prompt_version = str(cfg.get("AUTOALPHA_PROMPT_VERSION", "v2-diversity-20260423") or "v2-diversity-20260423")
+    explore_ratio = float(cfg.get("AUTOALPHA_EXPLORATION_RATIO", "0.35") or 0.35)
+    explore_every = max(3, round(1 / max(0.05, min(explore_ratio, 0.8))))
+    source_cycle = [
+        normalize_source_type(source.strip())
+        for source in str(cfg.get("AUTOALPHA_INSPIRATION_SOURCES", "paper,llm,future,manual")).split(",")
+        if source.strip()
+    ]
+    source_cycle = [source for source in source_cycle if source in {"paper", "llm", "future", "manual"}]
+    if not source_cycle:
+        source_cycle = ["paper", "llm", "future", "manual"]
+    exploration_sources = [
+        normalize_source_type(source.strip())
+        for source in str(cfg.get("AUTOALPHA_EXPLORATION_SOURCES", "paper,llm,future")).split(",")
+        if source.strip()
+    ]
+    exploration_sources = [source for source in exploration_sources if source in {"paper", "llm", "future", "manual"}] or ["paper", "llm", "future"]
+    is_exploration = (idea_index + 1) % explore_every == 0
+    target_source = (
+        exploration_sources[idea_index % len(exploration_sources)]
+        if is_exploration
+        else source_cycle[idea_index % len(source_cycle)]
+    )
     if inspirations:
         inspiration_text = inspirations
         inspiration_rows: list[dict[str, Any]] = []
     else:
-        inspiration_text, inspiration_rows = compose_inspiration_context_with_sources(limit=max(1, context_limit))
+        inspiration_text, inspiration_rows = compose_inspiration_context_with_sources(
+            limit=max(4, context_limit),
+            preferred_source=target_source,
+        )
     guidance = get_generation_guidance()
+    archetype_stats = get_default_cache().recent_archetype_outcomes(limit=80)
     source_types = [
-        str(row.get("source_type") or row.get("kind") or "manual")
+        normalize_source_type(row.get("source_type") or row.get("kind") or "manual")
         for row in inspiration_rows
     ]
     source_ids = [
@@ -457,16 +919,55 @@ def generate_idea(
         for row in inspiration_rows
         if row.get("id") is not None
     ]
-    primary_source = source_types[idea_index % len(source_types)] if source_types else ("custom" if inspirations else "none")
+    primary_source = (
+        target_source if target_source in source_types
+        else (source_types[idea_index % len(source_types)] if source_types else ("custom" if inspirations else "none"))
+    )
 
-    archetype = ARCHETYPES[idea_index % len(ARCHETYPES)]
+    archetype_key, archetype = _pick_archetype(
+        EXPLORATION_ARCHETYPES if is_exploration else ARCHETYPES,
+        idea_index=idea_index,
+        stats=archetype_stats,
+    )
+    relevant_experience = find_relevant_experience(
+        archetype=archetype,
+        failure_mode=str(guidance.get("dominant_failure_mode", "")),
+    )
 
     # ── Stage 1: Hypothesis (AlphaLogics) ────────────────────────────────────
     hypothesis_obj = _generate_hypothesis(archetype, parents, inspiration_text, guidance)
+    rag_query = archetype
+    if hypothesis_obj:
+        rag_query = " | ".join(
+            part for part in [
+                str(hypothesis_obj.get("hypothesis", "") or "").strip(),
+                f"fields: {', '.join(hypothesis_obj.get('key_fields') or [])}".strip(),
+                f"archetype: {hypothesis_obj.get('archetype', archetype_key)}",
+                f"horizon: {hypothesis_obj.get('time_horizon', '')}",
+            ]
+            if part and part.strip()
+        ) or archetype
 
     # ── Stage 2: Formula ─────────────────────────────────────────────────────
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    sections: List[str] = []
+    sections: List[tuple[str, str]] = []
+
+    # RAG: inject all verified passing factors first — highest-signal context
+    passing_rag = compose_passing_factors_rag(
+        query_text=rag_query,
+        max_factors=3 if is_exploration else 4,
+        semantic_k=2 if is_exploration else 3,
+        anchor_count=1,
+        include_formulas=not is_exploration,
+        include_template=False,
+    )
+    if passing_rag:
+        sections.append(("passing_rag", passing_rag))
+
+    # Failure pattern summary — explicit remediation guidance
+    failure_summary = compose_failure_pattern_summary()
+    if failure_summary:
+        sections.append(("failure_summary", failure_summary))
 
     # Inject Stage-1 hypothesis as grounding context
     if hypothesis_obj:
@@ -474,26 +975,45 @@ def generate_idea(
         h_fields = ", ".join(hypothesis_obj.get("key_fields") or [])
         h_horizon = hypothesis_obj.get("time_horizon", "")
         sections.append(
+            (
+            "hypothesis_context",
             "Market mechanism hypothesis to implement (AlphaLogics stage-1 output):\n"
             f"  Mechanism: {h_text}\n"
             f"  Key fields: {h_fields}\n"
             f"  Time horizon: {h_horizon} bars\n"
             "Translate this mechanism into a compact, competition-ready DSL formula."
+            )
         )
     else:
-        sections.append(f"Target archetype: {archetype}")
+        sections.append(("hypothesis_context", f"Target archetype: {archetype}"))
 
     parent_lines = _format_parent_lines(parents)
     if parent_lines:
-        sections.append(
-            "Prior tested factors (use as contrast set, not templates to copy):\n"
-            f"{parent_lines}"
-        )
+        if is_exploration:
+            sections.append(
+                (
+                "parent_context",
+                "Current strong parent factors (treat as an exclusion/contrast set; do NOT iterate their skeleton):\n"
+                f"{parent_lines}"
+                )
+            )
+        else:
+            sections.append(
+                (
+                "parent_context",
+                "Prior tested factors (use as contrast set, not templates to copy):\n"
+                f"{parent_lines}"
+                )
+            )
 
     if inspiration_text:
         sections.append(
-            "Fresh inspirations (convert mechanisms into factor structures, do not quote literally):\n"
+            (
+            "inspiration_text",
+            f"Fresh inspirations. Primary source target for this idea: {primary_source}. "
+            "Convert the source mechanism into a factor structure; do not quote literally:\n"
             f"{inspiration_text}"
+            )
         )
 
     # Hubble: family-aware negative RAG — exhausted structural skeletons
@@ -504,26 +1024,35 @@ def generate_idea(
             for rec in exhausted_families[:5]
         ]
         sections.append(
+            (
+            "exhausted_families",
             "Exhausted structural families — different field names will NOT rescue these "
             "operator skeletons, which have never passed despite multiple attempts:\n"
             + "\n".join(family_strs)
+            )
         )
 
     # FactorMiner: productive operator pairs from experience memory
     productive_pairs = guidance.get("productive_operator_pairs") or []
     if productive_pairs:
         sections.append(
+            (
+            "productive_pairs",
             "Operator combinations with proven win-rate in this research session "
             "(consider using these building blocks):\n  " + "\n  ".join(productive_pairs[:5])
+            )
         )
 
     # Token-level crowding from recent failures
     crowded_tokens = guidance.get("crowded_tokens") or []
     if crowded_tokens:
         sections.append(
+            (
+            "crowded_tokens",
             "Overused tokens in recent failed factors (avoid as the primary motif unless "
             "you materially transform the structure):\n"
             f"  {', '.join(crowded_tokens[:8])}"
+            )
         )
 
     failed_examples = _format_contrast_examples(
@@ -531,36 +1060,134 @@ def generate_idea(
         guidance.get("recent_failed_examples"),
     )
     if failed_examples:
-        sections.append(failed_examples)
+        sections.append(("failed_examples", failed_examples))
 
-    strong_examples = _format_contrast_examples(
-        "Strong examples that passed or stayed useful as references:",
-        guidance.get("strong_examples"),
-    )
-    if strong_examples:
-        sections.append(strong_examples)
+    tvr_alert = guidance.get("tvr_alert") or ""
+    if tvr_alert:
+        sections.append(("tvr_alert", f"⚠️ {tvr_alert}"))
 
     generation_experience = guidance.get("generation_experience_context") or ""
     if generation_experience:
         sections.append(
+            (
+            "generation_experience",
             "Generation-level research experience from previous rounds. Treat this as hard-earned lab memory; "
             "especially obey repeated failure lessons such as high turnover, unstable IR, duplicate structures, "
             "and DSL syntax pitfalls:\n"
             f"{generation_experience}"
+            )
+        )
+    if relevant_experience:
+        sections.append(
+            (
+            "relevant_experience",
+            "Older but relevant generation lesson matched to the current archetype/failure mode:\n"
+            f"{relevant_experience}"
+            )
         )
 
+    mode_rules = (
+        "1. This slot is EXPLORATION: start from fresh Paper/LLM/Future inspiration and target low correlation to parents; do not reuse the parent operator skeleton.\n"
+        "2. You may change both mechanism and skeleton, but keep turnover-safe smoothing and compact DSL.\n"
+        if is_exploration
+        else
+        "1. Follow the proven structural template from the RAG above when it fits: "
+        "neg(outer_smoother(cs_zscore(ts_mean(price_core * sigmoid_volume_gate, 3-4)))).\n"
+        "2. Vary the MECHANISM (what price signal, what confirmation), NOT only constants.\n"
+    )
     sections.append(
+        (
+        "mode_rules",
         f"This is idea {idea_index + 1} of {total_ideas}. "
-        "Generate ONE novel factor with a competition-oriented market rationale. "
-        "Prefer a strong but compact design: regime detector + signal core + stabilizer. "
-        "Bias toward formulas smooth enough to pass IR/turnover gates on full-history evaluation. "
-        "Maximize structural diversity versus recent failures. "
+        "Generate ONE novel factor. STRICT RULES:\n"
+        f"{mode_rules}"
+        "3. Outer smoother window MUST be >= 10 (ts_decay_linear >= 15, ts_ema >= 10).\n"
+        "4. Use sigmoid/tanh softening on all sub-signals before multiplying.\n"
+        "5. Do NOT copy any formula from the RAG verbatim — new price signal or new baseline.\n"
         "Return JSON only."
+        )
     )
 
-    messages.append({"role": "user", "content": "\n\n".join(sections)})
-    idea = call_llm(messages, max_tokens=700, tier="reasoning")
+    raw_section_lengths = {name: len((text or "").strip()) for name, text in sections}
+    raw_sections_total = sum(len((text or "").strip()) + 2 for _, text in sections)
+
+    def _build_formula_messages(
+        *,
+        system_prompt: str,
+        budget: int,
+        log_prefix: str,
+        section_names: set[str] | None = None,
+    ) -> list[dict[str, str]]:
+        prompt_sections = [
+            (name, text)
+            for name, text in sections
+            if section_names is None or name in section_names
+        ]
+        rendered_sections = _auto_compact_sections(
+            prompt_sections,
+            system_prompt=system_prompt,
+            total_budget=budget,
+        )
+        compacted_section_lengths = {
+            name: len(text)
+            for (name, _), text in zip(prompt_sections, rendered_sections)
+        }
+        raw_total = len(system_prompt) + sum(len((text or "").strip()) + 2 for _, text in prompt_sections)
+        compact_total = len(system_prompt) + sum(len(text) + 2 for text in rendered_sections)
+        print(
+            f"{log_prefix} formula_context chars "
+            f"before={raw_total} after={compact_total} "
+            f"budget={budget} sections="
+            + ", ".join(
+                f"{name}:{raw_section_lengths.get(name, 0)}->{compacted_section_lengths.get(name, 0)}"
+                for name, _ in prompt_sections
+            )
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n".join(rendered_sections)},
+        ]
+
+    messages = _build_formula_messages(
+        system_prompt=SYSTEM_PROMPT,
+        budget=PROMPT_TOTAL_CHAR_BUDGET,
+        log_prefix="[prompt]",
+    )
+    try:
+        idea = call_llm(messages, max_tokens=420, tier="reasoning")
+    except Exception as exc:
+        if not _should_retry_with_compact_prompt(exc):
+            raise
+        strict_messages = _build_formula_messages(
+            system_prompt=SYSTEM_PROMPT_COMPACT,
+            budget=PROMPT_STRICT_CHAR_BUDGET,
+            log_prefix="[prompt-retry]",
+        )
+        try:
+            idea = call_llm(strict_messages, max_tokens=280, tier="reasoning")
+        except Exception as retry_exc:
+            if not _should_retry_with_compact_prompt(retry_exc):
+                raise
+            emergency_messages = _build_formula_messages(
+                system_prompt=SYSTEM_PROMPT_COMPACT,
+                budget=PROMPT_EMERGENCY_CHAR_BUDGET,
+                log_prefix="[prompt-emergency]",
+                section_names={
+                    "hypothesis_context",
+                    "passing_rag",
+                    "inspiration_text",
+                    "failure_summary",
+                    "generation_experience",
+                    "mode_rules",
+                },
+            )
+            idea = call_llm(emergency_messages, max_tokens=220, tier="reasoning")
     idea["inspiration_source_type"] = primary_source
     idea["inspiration_source_types"] = sorted(set(source_types))
     idea["inspiration_ids"] = source_ids
+    idea["archetype"] = archetype_key
+    idea["archetype_label"] = archetype
+    idea["generation_mode"] = "exploration" if is_exploration else "iteration"
+    idea["target_source"] = target_source
+    idea["prompt_version"] = prompt_version
     return idea

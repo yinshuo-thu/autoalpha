@@ -3,10 +3,8 @@ import {
   BookOpen,
   Brain,
   ExternalLink,
-  Globe,
   Layers,
   Loader2,
-  MessageSquare,
   Plus,
   RefreshCw,
   Search,
@@ -27,7 +25,6 @@ interface Inspiration {
   summary: string;
   tags: string;
   source_type: string;
-  arxiv_id: string;
   published_date: string;
   quality_score: number;
   status: 'active' | 'inactive';
@@ -65,12 +62,10 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 }
 
 const SOURCE_TYPE_LABELS: Record<string, { label: string; color: string; icon: React.FC<{ className?: string }> }> = {
-  arxiv:  { label: 'ArXiv',  color: 'bg-blue-500/20 text-blue-300 border-blue-500/30',   icon: BookOpen },
-  wechat: { label: 'WeChat', color: 'bg-green-500/20 text-green-300 border-green-500/30', icon: MessageSquare },
+  paper:  { label: 'Paper',  color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30', icon: BookOpen },
   llm:    { label: 'LLM',    color: 'bg-purple-500/20 text-purple-300 border-purple-500/30', icon: Brain },
   future: { label: 'Future', color: 'bg-orange-500/20 text-orange-300 border-orange-500/30', icon: BookOpen },
-  manual: { label: '手动',   color: 'bg-amber-500/20 text-amber-300 border-amber-500/30',  icon: Layers },
-  url:    { label: 'URL',    color: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',    icon: Globe },
+  manual: { label: 'Manual', color: 'bg-amber-500/20 text-amber-300 border-amber-500/30',  icon: Layers },
 };
 
 function SourceBadge({ type }: { type: string }) {
@@ -115,13 +110,22 @@ const InspirationCard: React.FC<{
               {item.published_date && (
                 <span className="text-xs text-muted-foreground">{item.published_date}</span>
               )}
-              {item.arxiv_id && (
-                <span className="text-xs font-mono text-muted-foreground">{item.arxiv_id}</span>
-              )}
             </div>
-            <h3 className="text-sm font-semibold leading-snug truncate" title={item.title}>
-              {item.title}
-            </h3>
+            {item.source_type === 'paper' && item.source?.startsWith('http') ? (
+              <a
+                href={item.source}
+                target="_blank"
+                rel="noreferrer"
+                className="block truncate text-sm font-semibold leading-snug text-sky-300 underline-offset-2 hover:underline"
+                title={item.source}
+              >
+                {item.title}
+              </a>
+            ) : (
+              <h3 className="text-sm font-semibold leading-snug truncate" title={item.title}>
+                {item.title}
+              </h3>
+            )}
           </div>
 
           {/* Actions */}
@@ -199,11 +203,8 @@ const InspirationCard: React.FC<{
 const AddInspirationForm: React.FC<{ onAdded: () => void }> = ({ onAdded }) => {
   const [input, setInput] = useState('');
   const [title, setTitle] = useState('');
-  const [sourceType, setSourceType] = useState('manual');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  const isUrl = /^https?:\/\//i.test(input.trim());
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,7 +218,7 @@ const AddInspirationForm: React.FC<{ onAdded: () => void }> = ({ onAdded }) => {
           input: input.trim(),
           raw_input: input.trim(),
           title: title.trim(),
-          source_type: isUrl ? (input.includes('mp.weixin.qq.com') ? 'wechat' : sourceType) : sourceType,
+          source_type: 'manual',
         }),
       });
       setInput('');
@@ -240,7 +241,7 @@ const AddInspirationForm: React.FC<{ onAdded: () => void }> = ({ onAdded }) => {
       <div>
         <input
           type="text"
-          placeholder="粘贴 URL（微信文章、arxiv 等）或输入文字想法…"
+          placeholder="粘贴 URL、论文链接、研究笔记，或直接输入文字想法…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           className="w-full bg-secondary/30 border border-border/50 rounded-lg px-3 py-2 text-sm
@@ -257,18 +258,6 @@ const AddInspirationForm: React.FC<{ onAdded: () => void }> = ({ onAdded }) => {
           className="flex-1 bg-secondary/30 border border-border/50 rounded-lg px-3 py-2 text-sm
                      placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
         />
-        <select
-          value={sourceType}
-          onChange={(e) => setSourceType(e.target.value)}
-          className="bg-secondary/30 border border-border/50 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary/50"
-        >
-          <option value="manual">手动</option>
-          <option value="wechat">微信</option>
-          <option value="url">URL</option>
-          <option value="llm">LLM</option>
-          <option value="arxiv">ArXiv</option>
-          <option value="future">Future</option>
-        </select>
         <button
           type="submit"
           disabled={loading || !input.trim()}
@@ -389,11 +378,14 @@ export const InspirationBrowserPage: React.FC = () => {
     setFetchMessage('');
     setFetchError('');
     try {
-      const result = await apiFetch<{ added?: Record<string, number> }>('/api/autoalpha/inspirations/fetch?llm_ideas=6&arxiv_per_query=5', {
+      const result = await apiFetch<{ added?: Record<string, number> }>('/api/autoalpha/inspirations/fetch?llm_ideas=6&paper_results=12', {
         method: 'POST',
       });
       const added = result.added || {};
-      setFetchMessage(`抓取完成：ArXiv ${added.arxiv ?? 0}，URL ${added.url ?? 0}，LLM ${added.llm ?? 0}，Future ${added.future ?? 0}，重复 ${added.skipped ?? 0}`);
+      setFetchMessage(
+        `抓取完成：Paper ${added.paper ?? 0}，Manual ${added.manual ?? 0}，LLM ${added.llm ?? 0}，` +
+        `Future ${added.future ?? 0}，初筛淘汰 ${added.screened_out ?? 0}，重复 ${added.skipped ?? 0}`,
+      );
       setPage(1);
       await load(1, sourceType, search, includeInactive);
     } catch (exc: any) {
@@ -403,16 +395,16 @@ export const InspirationBrowserPage: React.FC = () => {
     }
   };
 
-  const sourceTypes = ['all', 'arxiv', 'future', 'wechat', 'llm', 'manual', 'url'];
+  const sourceTypes = ['all', 'manual', 'paper', 'llm', 'future'];
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold">灵感库</h2>
+          <h2 className="text-2xl font-bold">Ideas</h2>
           <p className="text-sm text-muted-foreground mt-0.5">
-            管理 ArXiv 论文、公众号文章、LLM 构想等多源因子灵感
+            管理 Manual 研究输入、外部 Paper、LLM 构想与 Future Markdown
           </p>
         </div>
         <CacheStatusBar />

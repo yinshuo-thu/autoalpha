@@ -103,7 +103,8 @@ class GenAlpha:
             rest = df_rest['trading_restriction'] if 'trading_restriction' in df_rest.columns else pd.Series(dtype=float)
             
             metrics = Evaluator.run(alpha_final, resp, rest)
-            
+            metrics["formula"] = formula
+
             # Save diagnostics
             export_dir = os.path.join(RESEARCH_ARTIFACTS_ROOT, run_id)
             Diagnostics.export(metrics, export_dir)
@@ -119,10 +120,11 @@ class GenAlpha:
                 sys.path.append(base_dir)
             from outputs.export_submission import export_to_parquet
             out_path = export_to_parquet(
-                alpha_final, 
-                run_id, 
-                metrics=metrics, 
-                description=f"Generated via GenAlpha for formula: {formula}"
+                alpha_final,
+                run_id,
+                metrics=metrics,
+                description=f"Generated via GenAlpha for formula: {formula}",
+                hypothesis=f"GenAlpha batch run [{run_id}]",
             )
             
         return {

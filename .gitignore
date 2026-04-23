@@ -8,6 +8,8 @@ cache/
 outputs/*.pq
 research_runs/*.json
 submit/**/*.pq
+manual/submit/**/*.pq
+manual/submit/*.pq
 autoalpha/output/**/*.pq
 autoalpha/output/*.pq
 autoalpha/submit/**/*.pq

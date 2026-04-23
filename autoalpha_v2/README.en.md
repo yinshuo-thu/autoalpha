@@ -65,7 +65,7 @@ auditable, source-attributed, and submit-ready.
 | Artifact policy | Many exploratory outputs live under `outputs/`, `research/`, `submit/`, and manual reports. | Passing factors get canonical `.pq`, metadata, official-like result JSON, report, and factor card under `autoalpha_v2/submit` and `autoalpha_v2/research`. |
 | Knowledge memory | Leaderboard and logs guide later iterations informally. | `knowledge.json` stores every tested factor, failure reason, parent lineage, fingerprints, card paths, lab-test results, and generation summaries. |
 | Agent feedback | Top formulas can be reused, but failure families are less explicit. | LLM prompts receive strong examples, recent weak examples, productive operator pairs, and saturated structural families. |
-| Inspiration sources | Prompting is mostly ad hoc or tied to one script run. | ArXiv, LLM brainstorms, and local `fut_feat/*.md` futures-factor notes are synced into one inspiration database and attributed to generated factors. |
+| Inspiration sources | Prompting is mostly ad hoc or tied to one script run. | Paper, LLM brainstorms, and local `fut_feat/*.md` futures-factor notes are synced into one inspiration database and attributed to generated factors. |
 | Frontend | General dashboard/backend integration. | Dedicated AutoAlpha cockpit: quota/status, prompt lab, rolling model lab, generation records, submit-card links, inspiration database, and source-conversion charts. |
 | Submission safety | Submission helpers exist but can be called independently. | Submit readiness is a gate-controlled state; only `PassGates=true` factors are copied to `autoalpha_v2/submit` and rendered with factor cards. |
 
@@ -352,7 +352,7 @@ knowledge base and displayed separately from local official-like metrics.
 
 ## Frontend
 
-The v2 records page adds source-conversion charts for ArXiv / LLM / Future
+The v2 records page adds source-conversion charts for Paper / LLM / Future
 inspirations: source count, passing factor count, pass rate, valid factors per
 prompt, and each source's share of all valid factors.
 

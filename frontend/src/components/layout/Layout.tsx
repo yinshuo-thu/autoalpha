@@ -1,7 +1,7 @@
 import React from 'react';
 import { Archive, Settings as SettingsIcon, Bot, Lightbulb } from 'lucide-react';
 
-export type PageId = 'home' | 'backtest' | 'records' | 'settings' | 'autoalpha' | 'inspirations';
+export type PageId = 'home' | 'backtest' | 'records' | 'settings' | 'autoalpha' | 'inspirations' | 'dev';
 interface LayoutProps {
   children: React.ReactNode;
   currentPage: PageId;
@@ -21,8 +21,8 @@ export const Layout: React.FC<LayoutProps> = ({
 
   const navItems = [
     { id: 'autoalpha' as const, label: 'AutoAlpha', icon: Bot },
-    { id: 'records' as const, label: '研究记录', icon: Archive },
-    { id: 'inspirations' as const, label: '灵感库', icon: Lightbulb },
+    { id: 'records' as const, label: 'Record', icon: Archive },
+    { id: 'inspirations' as const, label: 'Ideas', icon: Lightbulb },
     { id: 'settings' as const, label: '任务设置', icon: SettingsIcon },
   ];
 
@@ -36,14 +36,18 @@ export const Layout: React.FC<LayoutProps> = ({
               className="flex min-w-0 cursor-pointer items-center gap-3 transition-opacity hover:opacity-80"
               onClick={() => onNavigate('autoalpha')}
             >
-              <div className="relative">
-                <div className="relative flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary/10 to-primary/5">
-                  <img src="/st-logo.png" alt="Logo" className="h-8 w-8 object-contain" />
-                </div>
-              </div>
+              <img src="/st-logo.png" alt="Logo" className="h-12 w-12 object-contain" />
               <div className="min-w-0">
                 <h1 className="truncate text-xl font-bold">AutoAlpha</h1>
-                <p className="text-xs text-muted-foreground">Research Cockpit</p>
+                <a
+                  href="https://www.linkedin.com/in/shuoyin/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hidden max-w-[260px] truncate text-[11px] leading-4 text-muted-foreground/80 hover:text-foreground sm:block"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  Shuo Yin @ Tsinghua Univ | yinelon@gmail.com
+                </a>
               </div>
             </div>
 

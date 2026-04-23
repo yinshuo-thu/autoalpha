@@ -1,9 +1,9 @@
 """
-QuantaAlpha Backend API
-FastAPI-based REST + WebSocket API for factor mining and backtesting.
+AutoAlpha Backend API (optional FastAPI layer under frontend/backend)
+REST + WebSocket API for factor mining and backtesting.
 
-Integrates with the core QuantaAlpha CLI to launch experiments
-and reads factor library JSON for the factor browsing API.
+May integrate with optional `quantaalpha` CLI when installed; otherwise
+launches project-root Python entrypoints. Reads factor library JSON for browsing.
 """
 
 import asyncio
@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 # Resolve project root (two levels up from this file: frontend-v2/backend/)
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-# Ensure import quantaalpha is available (when backend is started from frontend-v2 directory, repo root is not in sys.path)
+# Repo root on sys.path (for optional quantaalpha package or local modules)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 DOTENV_PATH = PROJECT_ROOT / ".env"
@@ -35,7 +35,7 @@ DOTENV_PATH = PROJECT_ROOT / ".env"
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="QuantaAlpha API", version="2.0.0")
+app = FastAPI(title="AutoAlpha API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -183,7 +183,7 @@ async def _broadcast(task_id: str, message: Dict[str, Any]):
 
 async def _run_mining(task_id: str, req: MiningStartRequest):
     """
-    Launch the actual QuantaAlpha mining experiment as a subprocess
+    Launch the factor mining experiment as a subprocess
     and stream its output over WebSocket.
     """
     task = tasks[task_id]
@@ -453,7 +453,7 @@ async def _run_mining(task_id: str, req: MiningStartRequest):
 
 @app.get("/")
 async def root():
-    return {"message": "QuantaAlpha API", "version": "2.0.0"}
+    return {"message": "AutoAlpha API", "version": "2.0.0"}
 
 
 @app.get("/api/health")
@@ -862,7 +862,7 @@ async def _run_backtest(task_id: str, req: BacktestStartRequest, config_path: st
 
         # --- Find the correct Python executable ---
         # Prefer the conda env that has qlib installed
-        conda_env = dotenv.get("CONDA_ENV_NAME", "quantaalpha")
+        conda_env = dotenv.get("CONDA_ENV_NAME", "autoalpha")
         python_bin = sys.executable  # fallback
 
         # Dynamically detect conda base path (portable, no hardcoded paths)
@@ -1331,6 +1331,181 @@ def _update_mining_metrics(task: Dict[str, Any]):
             
     except Exception:
         pass # Best effort
+
+# ============================================================
+# AutoAlpha Inspiration & Idea-Cache endpoints
+# ============================================================
+
+class InspirationAddRequest(BaseModel):
+    # Accept both legacy field name "input" and new "raw_input"
+    raw_input: Optional[str] = Field(None, description="URL or plain text")
+    input: Optional[str] = Field(None, description="Legacy alias for raw_input")
+    title: str = Field("", description="Optional title override")
+    source_type: str = Field("manual", description="manual | wechat | paper | llm | url")
+
+
+def _build_legacy_inspiration_payload(limit: int = 12) -> dict:
+    """Return the legacy InspirationPayload shape expected by AutoAlphaPage."""
+    from autoalpha_v2.inspiration_db import (
+        list_recent_inspirations, compose_inspiration_context, DB_PATH, PROMPT_DIR
+    )
+    items = list_recent_inspirations(limit=limit)
+    return {
+        "count": len(items),
+        "items": [dict(r) for r in items],
+        "prompt_dir": str(PROMPT_DIR),
+        "database_path": str(DB_PATH),
+        "prompt_context_preview": compose_inspiration_context(limit=6),
+    }
+
+
+@app.get("/api/autoalpha/inspirations")
+async def list_inspirations_legacy():
+    """Legacy endpoint — returns InspirationPayload shape used by AutoAlphaPage."""
+    try:
+        return {"success": True, "data": _build_legacy_inspiration_payload()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/autoalpha/inspirations/browse")
+async def browse_inspirations(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    source_type: str = Query("all"),
+    search: str = Query(""),
+    include_inactive: bool = Query(False),
+):
+    """Paginated, filterable inspiration list for InspirationBrowserPage."""
+    try:
+        from autoalpha_v2.inspiration_db import list_inspirations_paginated
+        result = list_inspirations_paginated(
+            page=page,
+            per_page=per_page,
+            source_type=source_type if source_type != "all" else None,
+            search=search or None,
+            include_inactive=include_inactive,
+        )
+        result["items"] = [dict(row) for row in result["items"]]
+        return {"success": True, "data": result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/autoalpha/inspirations")
+async def add_inspiration(req: InspirationAddRequest):
+    """Add a new inspiration (URL or text). Accepts both raw_input and legacy input field."""
+    raw = (req.raw_input or req.input or "").strip()
+    if not raw:
+        raise HTTPException(status_code=422, detail="raw_input or input is required")
+    try:
+        from autoalpha_v2.inspiration_db import prepare_inspiration, save_inspiration
+        record = prepare_inspiration(raw, title=req.title)
+        record["source_type"] = req.source_type
+        saved = save_inspiration(record)
+        # Return legacy payload so AutoAlphaPage can update its state
+        return {"success": True, "data": _build_legacy_inspiration_payload()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/autoalpha/inspirations/sync")
+async def sync_inspirations():
+    """Sync prompt directory files into the inspiration DB (legacy AutoAlphaPage action)."""
+    try:
+        from autoalpha_v2.inspiration_db import sync_prompt_directory, list_recent_inspirations, compose_inspiration_context, DB_PATH, PROMPT_DIR
+        sync_prompt_directory(limit=80)
+        return {"success": True, "data": _build_legacy_inspiration_payload()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/autoalpha/inspirations/fetch")
+async def trigger_inspiration_fetch(
+    llm_ideas: int = Query(6, ge=0, le=20),
+    paper_results: int = Query(12, ge=0, le=30),
+):
+    """Trigger one inspiration-fetch cycle and return the additions."""
+    import asyncio
+
+    async def _run():
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        def _sync():
+            from autoalpha_v2.inspiration_fetcher import run_fetch_cycle
+            return run_fetch_cycle(
+                llm_ideas=llm_ideas,
+                paper_results=paper_results,
+            )
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return await loop.run_in_executor(pool, _sync)
+
+    added = await _run()
+    return {"success": True, "data": {"status": "fetch_done", "added": added}}
+
+
+@app.put("/api/autoalpha/inspirations/{entry_id}/toggle")
+async def toggle_inspiration(entry_id: int):
+    """Toggle active/inactive status of an inspiration."""
+    try:
+        from autoalpha_v2.inspiration_db import toggle_inspiration_status
+        updated = toggle_inspiration_status(entry_id)
+        return {"success": True, "data": dict(updated)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/autoalpha/inspirations/{entry_id}")
+async def delete_inspiration(entry_id: int):
+    """Permanently delete an inspiration."""
+    try:
+        from autoalpha_v2.inspiration_db import delete_inspiration as _delete
+        ok = _delete(entry_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Inspiration {entry_id} not found")
+        return {"success": True, "data": {"deleted": entry_id}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/autoalpha/idea-cache/status")
+async def idea_cache_status():
+    """Return current idea-cache statistics."""
+    try:
+        from autoalpha_v2.idea_cache import get_default_cache
+        cache = get_default_cache()
+        return {"success": True, "data": cache.status()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/autoalpha/idea-cache")
+async def clear_idea_cache():
+    """Clear all unconsumed cached ideas."""
+    try:
+        from autoalpha_v2.idea_cache import get_default_cache
+        cache = get_default_cache()
+        n = cache.clear()
+        return {"success": True, "data": {"cleared": n}}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/autoalpha/factor-correlations")
+async def autoalpha_factor_correlations():
+    """Return cached AutoAlpha v2 factor-correlation heatmap data."""
+    cache_path = PROJECT_ROOT / "autoalpha_v2" / "factor_correlations.json"
+    if not cache_path.is_file():
+        return {"success": True, "data": {"labels": [], "run_ids": [], "matrix": [], "updated_at": ""}}
+    try:
+        return {"success": True, "data": json.loads(cache_path.read_text(encoding="utf-8"))}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 if __name__ == "__main__":
     import uvicorn
