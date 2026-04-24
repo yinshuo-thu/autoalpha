@@ -19,6 +19,7 @@ import pandas as pd
 
 RESEARCH_DIR = Path(__file__).resolve().parent / "research"
 CORRELATION_CACHE_PATH = Path(__file__).resolve().parent / "factor_correlations.json"
+DEFAULT_CORRELATION_MATRIX_FACTORS = 0
 
 ALLOWED_UTC_TIMES = {
     "01:45:00", "02:00:00", "02:15:00", "02:30:00",
@@ -325,6 +326,33 @@ def _read_parquet_alpha_wide(path: str, sample_dates: Optional[list[str]]) -> pd
     return frame.set_index(["date", "datetime", "security_id"])["alpha"].unstack("security_id")
 
 
+def _read_daily_alpha_wide(path: str, sample_dates: Optional[list[str]]) -> pd.DataFrame:
+    if not path:
+        return pd.DataFrame()
+    try:
+        kwargs: dict[str, Any] = {"columns": ["date", "security_id", "alpha"]}
+        if sample_dates:
+            kwargs["filters"] = [("date", "in", sample_dates)]
+        frame = pd.read_parquet(path, **kwargs)
+    except Exception:
+        return pd.DataFrame()
+    if frame.empty or "alpha" not in frame.columns:
+        return pd.DataFrame()
+    frame["date"] = pd.to_datetime(frame["date"]).dt.normalize()
+    if sample_dates:
+        frame = frame[frame["date"].dt.strftime("%Y-%m-%d").isin(sample_dates)]
+    if frame.empty:
+        return pd.DataFrame()
+    daily = (
+        frame.groupby(["date", "security_id"], sort=True)["alpha"]
+        .mean()
+        .astype("float32")
+        .unstack("security_id")
+        .sort_index()
+    )
+    return daily
+
+
 def _existing_alpha_path(item: Dict[str, Any]) -> str:
     for key in ("submit_path", "parquet_path"):
         path = str(item.get(key) or "")
@@ -344,6 +372,248 @@ def _mean_bar_correlation(left: pd.DataFrame, right: pd.DataFrame) -> tuple[floa
     if vals.empty:
         return 0.0, 0
     return float(vals.mean()), int(vals.count())
+
+
+def _load_correlation_cache() -> Dict[str, Any]:
+    if CORRELATION_CACHE_PATH.is_file():
+        try:
+            payload = json.loads(CORRELATION_CACHE_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    return {}
+
+
+def _load_passing_factors() -> List[Dict[str, Any]]:
+    from autoalpha_v2 import knowledge_base as _kb
+
+    return [
+        factor
+        for factor in _kb.get_all_factors()
+        if factor.get("PassGates") and _existing_alpha_path(factor)
+    ]
+
+
+def _sort_factors_for_trend(factors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        [factor for factor in factors if factor.get("run_id")],
+        key=lambda item: (str(item.get("created_at", "")), str(item.get("run_id", ""))),
+    )
+
+
+def _sort_factors_for_heatmap(factors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return _sort_factors_for_trend(factors)
+
+
+def _limit_correlation_factors(
+    factors: List[Dict[str, Any]],
+    max_factors: int,
+) -> List[Dict[str, Any]]:
+    if max_factors and max_factors > 0:
+        return factors[:max_factors]
+    return factors
+
+
+def _expected_trend_run_ids(factors: List[Dict[str, Any]]) -> List[str]:
+    return [str(factor.get("run_id", "")) for factor in _sort_factors_for_trend(factors)]
+
+
+def _expected_heatmap_run_ids(factors: List[Dict[str, Any]], max_factors: int) -> List[str]:
+    return [
+        str(factor.get("run_id", ""))
+        for factor in _limit_correlation_factors(_sort_factors_for_heatmap(factors), max_factors)
+    ]
+
+
+def _correlation_cache_status(
+    payload: Dict[str, Any],
+    max_factors: int = DEFAULT_CORRELATION_MATRIX_FACTORS,
+    passing: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"heatmap_stale": True, "trend_stale": True}
+
+    passing = passing if passing is not None else _load_passing_factors()
+    expected_trend_ids = _expected_trend_run_ids(passing)
+    expected_heatmap_ids = _expected_heatmap_run_ids(passing, max_factors)
+
+    heatmap_stale = not isinstance(payload.get("matrix"), list)
+    if not heatmap_stale:
+        actual_heatmap_ids = [str(run_id) for run_id in payload.get("run_ids", []) if run_id]
+        heatmap_stale = (
+            actual_heatmap_ids != expected_heatmap_ids
+            or len(payload.get("matrix", [])) != len(actual_heatmap_ids)
+        )
+
+    trend_rows = payload.get("trend_rows")
+    actual_trend_ids = []
+    if isinstance(trend_rows, list):
+        actual_trend_ids = [
+            str(row.get("run_id", ""))
+            for row in trend_rows
+            if isinstance(row, dict) and row.get("run_id")
+        ]
+    trend_stale = actual_trend_ids != expected_trend_ids
+
+    return {"heatmap_stale": heatmap_stale, "trend_stale": trend_stale}
+
+
+def _resolve_correlation_sample_dates(
+    factors: List[Dict[str, Any]],
+    existing_cache: Optional[Dict[str, Any]] = None,
+) -> list[str]:
+    cached_dates = []
+    if isinstance(existing_cache, dict):
+        cached_dates = [
+            str(item)
+            for item in existing_cache.get("sample_dates", [])
+            if str(item)
+        ]
+    if cached_dates:
+        return cached_dates[-60:]
+
+    if not factors:
+        return []
+
+    latest_factor = _sort_factors_for_trend(factors)[-1]
+    latest_path = _existing_alpha_path(latest_factor)
+    if not latest_path:
+        return []
+
+    try:
+        date_frame = pd.read_parquet(str(latest_path), columns=["date"])
+        dates = pd.to_datetime(date_frame["date"]).dt.strftime("%Y-%m-%d").drop_duplicates().sort_values()
+        return dates.iloc[-60:].tolist()
+    except Exception:
+        return []
+
+
+def refresh_factor_correlation_trend_rows(
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    factors: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    payload = dict(payload or _load_correlation_cache())
+    passing = factors if factors is not None else _load_passing_factors()
+    sample_dates = _resolve_correlation_sample_dates(passing, existing_cache=payload)
+    payload["trend_rows"] = _build_factor_correlation_trend_rows(
+        passing,
+        sample_dates,
+        existing_rows=payload.get("trend_rows"),
+    )
+    payload["sample_dates"] = sample_dates
+    payload["trend_basis"] = (
+        "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days"
+    )
+    payload["updated_at"] = pd.Timestamp.now().isoformat()
+    CORRELATION_CACHE_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
+def load_factor_correlation_cache(
+    max_factors: int = DEFAULT_CORRELATION_MATRIX_FACTORS,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    if not refresh:
+        payload = _load_correlation_cache()
+        if payload:
+            passing = _load_passing_factors()
+            status = _correlation_cache_status(payload, max_factors=max_factors, passing=passing)
+            if not status["trend_stale"] and not status["heatmap_stale"]:
+                return payload
+            if status["heatmap_stale"]:
+                return build_factor_correlation_matrix(max_factors=max_factors)
+            if status["trend_stale"]:
+                return refresh_factor_correlation_trend_rows(payload, factors=passing)
+    return build_factor_correlation_matrix(max_factors=max_factors)
+
+
+def _build_factor_correlation_trend_rows(
+    factors: List[Dict[str, Any]],
+    sample_dates: Optional[list[str]],
+    existing_rows: List[Dict[str, Any]] | None = None,
+) -> List[Dict[str, Any]]:
+    ordered_factors = _sort_factors_for_trend(factors)
+    if not ordered_factors:
+        return []
+
+    existing_by_id = {
+        str(row.get("run_id", "")): row
+        for row in (existing_rows or [])
+        if isinstance(row, dict) and row.get("run_id")
+    }
+
+    normalized_series: list[pd.Series] = []
+    for factor in ordered_factors:
+        run_id = str(factor.get("run_id", ""))
+        path = _existing_alpha_path(factor)
+        if not path:
+            continue
+        daily = _read_daily_alpha_wide(path, sample_dates or None)
+        if not daily.empty:
+            demeaned = daily.sub(daily.mean(axis=1), axis=0)
+            scaled = demeaned.div(daily.std(axis=1).replace(0.0, np.nan), axis=0)
+            stacked = scaled.stack(future_stack=True).replace([np.inf, -np.inf], np.nan)
+            if not stacked.empty:
+                normalized_series.append(stacked.rename(run_id).astype("float32"))
+
+    corr_matrix = pd.DataFrame()
+    if normalized_series:
+        aligned = pd.concat(normalized_series, axis=1, join="outer")
+        corr_matrix = aligned.corr(method="pearson", min_periods=200)
+
+    trend_rows: list[Dict[str, Any]] = []
+    prior_run_ids: list[str] = []
+    for index, factor in enumerate(ordered_factors, start=1):
+        run_id = str(factor.get("run_id", ""))
+        row: Dict[str, Any]
+        if run_id in corr_matrix.columns and prior_run_ids:
+            values = corr_matrix[run_id].reindex(prior_run_ids).dropna()
+            if not values.empty:
+                row = {
+                    "run_id": run_id,
+                    "avg_corr": _round4(float(values.mean())),
+                    "max_corr": _round4(float(values.max())),
+                    "min_corr": _round4(float(values.min())),
+                    "pair_count": int(values.count()),
+                    "basis": "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days",
+                }
+            else:
+                row = existing_by_id.get(run_id) or {
+                    "run_id": run_id,
+                    "avg_corr": 0.0,
+                    "max_corr": 0.0,
+                    "min_corr": 0.0,
+                    "pair_count": 0,
+                    "basis": "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days",
+                }
+        else:
+            row = {
+                "run_id": run_id,
+                "avg_corr": 0.0,
+                "max_corr": 0.0,
+                "min_corr": 0.0,
+                "pair_count": 0,
+                "basis": "first passing factor has no prior factor correlations",
+            }
+        trend_rows.append({
+            "index": index,
+            "label": f"#{index}",
+            "run_id": run_id,
+            "created_at": factor.get("created_at", ""),
+            "generation": int(factor.get("generation", 0) or 0),
+            "tested_index": index,
+            "score": _round4(factor.get("Score", 0)),
+            "ic": _round4(factor.get("IC", 0)),
+            "avg_corr": _round4(row.get("avg_corr", 0)),
+            "max_corr": _round4(row.get("max_corr", 0)),
+            "min_corr": _round4(row.get("min_corr", 0)),
+            "pair_count": int(row.get("pair_count", 0) or 0),
+            "basis": row.get("basis", "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days"),
+        })
+        prior_run_ids.append(run_id)
+    return trend_rows
 
 
 def _compute_redundancy(
@@ -380,7 +650,7 @@ def _compute_redundancy(
 
         # Parallel parquet reads for passing factors.  Keep the cap generous so
         # factor cards can show broad redundancy, while avoiding unbounded I/O.
-        top_factors = sorted(factors, key=lambda r: r.get("Score", 0), reverse=True)[:max_corr_factors]
+        top_factors = _sort_factors_for_heatmap(factors)[:max_corr_factors]
 
         def _read_and_corr(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             path = _existing_alpha_path(item)
@@ -667,10 +937,7 @@ def update_all_factor_card_correlations() -> int:
     if len(all_passing) < 2:
         return 0
 
-    expected_ids = [
-        str(f.get("run_id", ""))
-        for f in sorted(all_passing, key=lambda item: float(item.get("Score", 0) or 0), reverse=True)[:30]
-    ]
+    expected_ids = _expected_heatmap_run_ids(all_passing, DEFAULT_CORRELATION_MATRIX_FACTORS)
     cache: Dict[str, Any] = {}
     if CORRELATION_CACHE_PATH.is_file():
         try:
@@ -678,7 +945,7 @@ def update_all_factor_card_correlations() -> int:
         except Exception:
             cache = {}
     if not cache or cache.get("run_ids") != expected_ids:
-        cache = build_factor_correlation_matrix(max_factors=30, update_cards=False)
+        cache = build_factor_correlation_matrix(max_factors=DEFAULT_CORRELATION_MATRIX_FACTORS, update_cards=False)
     cache_rows = {
         run_id: {
             other_id: corr
@@ -855,49 +1122,29 @@ def _select_low_corr_factors(
     }
 
 
-def build_factor_correlation_matrix(max_factors: int = 15, update_cards: bool = False) -> Dict[str, Any]:
-    """
-    Compute a compact pairwise realized-alpha correlation matrix for passing factors.
-    Uses the latest 60 shared days, then writes a cache consumed by the records page.
-    """
-    from autoalpha_v2 import knowledge_base as _kb
-
-    passing = [
-        f for f in _kb.get_all_factors()
-        if f.get("PassGates") and _existing_alpha_path(f)
-    ]
-    passing.sort(key=lambda item: float(item.get("Score", 0) or 0), reverse=True)
-    passing = passing[:max_factors]
-    run_ids = [str(f.get("run_id", "")) for f in passing]
+def _compute_pairwise_correlation_payload(
+    factors: List[Dict[str, Any]],
+    *,
+    sample_dates: Optional[list[str]],
+) -> Dict[str, Any]:
+    ordered = list(factors)
+    run_ids = [str(f.get("run_id", "")) for f in ordered]
     labels = [rid.replace("autoalpha_", "").replace("_0", "_") for rid in run_ids]
-    if len(passing) < 2:
-        payload = {
-            "labels": labels,
-            "run_ids": run_ids,
-            "matrix": [[1.0] for _ in run_ids] if run_ids else [],
-            "low_corr_selection": _select_low_corr_factors(
-                passing, run_ids, [[1.0] for _ in run_ids] if run_ids else []
-            ),
-            "sample_dates": [],
-            "n_bars": {},
-            "basis": "mean bar-wise Pearson corr on latest 60 shared days",
-            "updated_at": pd.Timestamp.now().isoformat(),
-        }
-        CORRELATION_CACHE_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        return payload
 
-    sample_dates: list[str] = []
-    first_path = _existing_alpha_path(passing[0])
-    try:
-        date_frame = pd.read_parquet(str(first_path), columns=["date"])
-        dates = pd.to_datetime(date_frame["date"]).dt.strftime("%Y-%m-%d").drop_duplicates().sort_values()
-        sample_dates = dates.iloc[-60:].tolist()
-    except Exception:
-        sample_dates = []
+    if not ordered:
+        return {
+            "run_ids": [],
+            "labels": [],
+            "matrix": [],
+            "n_bars": {},
+            "wides": {},
+        }
 
     wides: dict[str, pd.DataFrame] = {}
-    for factor in passing:
+    for factor in ordered:
         path = _existing_alpha_path(factor)
+        if not path:
+            continue
         wide = _read_parquet_alpha_wide(str(path), sample_dates or None)
         if not wide.empty:
             wides[str(factor.get("run_id", ""))] = wide
@@ -920,14 +1167,78 @@ def build_factor_correlation_matrix(max_factors: int = 15, update_cards: bool = 
             n_bars[f"{row_id}|{col_id}"] = bars
         matrix.append(row)
 
-    payload = {
-        "labels": labels,
+    return {
         "run_ids": run_ids,
+        "labels": labels,
         "matrix": matrix,
-        "low_corr_selection": _select_low_corr_factors(passing, run_ids, matrix),
-        "sample_dates": sample_dates,
         "n_bars": n_bars,
+        "wides": wides,
+    }
+
+
+def build_factor_correlation_matrix(
+    max_factors: int = DEFAULT_CORRELATION_MATRIX_FACTORS,
+    update_cards: bool = False,
+) -> Dict[str, Any]:
+    """
+    Compute a compact pairwise realized-alpha correlation matrix for passing factors.
+    Uses the latest 60 shared days, then writes a cache consumed by the records page.
+    """
+    existing_cache = _load_correlation_cache()
+    passing_all = _load_passing_factors()
+    ordered_passing = _sort_factors_for_heatmap(passing_all)
+    passing = _limit_correlation_factors(ordered_passing, max_factors)
+
+    sample_dates = _resolve_correlation_sample_dates(passing_all, existing_cache=existing_cache)
+
+    trend_rows = _build_factor_correlation_trend_rows(
+        passing_all,
+        sample_dates,
+        existing_rows=existing_cache.get("trend_rows"),
+    )
+    heatmap_payload = _compute_pairwise_correlation_payload(
+        passing,
+        sample_dates=sample_dates,
+    )
+    selection_payload = _compute_pairwise_correlation_payload(
+        ordered_passing,
+        sample_dates=sample_dates,
+    )
+
+    if len(passing) < 2:
+        payload = {
+            "labels": heatmap_payload["labels"],
+            "run_ids": heatmap_payload["run_ids"],
+            "matrix": heatmap_payload["matrix"] or ([[1.0] for _ in heatmap_payload["run_ids"]] if heatmap_payload["run_ids"] else []),
+            "low_corr_selection": _select_low_corr_factors(
+                ordered_passing,
+                selection_payload["run_ids"],
+                selection_payload["matrix"] or ([[1.0] for _ in selection_payload["run_ids"]] if selection_payload["run_ids"] else []),
+            ),
+            "sample_dates": [],
+            "n_bars": heatmap_payload["n_bars"],
+            "basis": "mean bar-wise Pearson corr on latest 60 shared days",
+            "trend_rows": trend_rows,
+            "trend_basis": "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days",
+            "updated_at": pd.Timestamp.now().isoformat(),
+        }
+        CORRELATION_CACHE_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return payload
+
+    payload = {
+        "labels": heatmap_payload["labels"],
+        "run_ids": heatmap_payload["run_ids"],
+        "matrix": heatmap_payload["matrix"],
+        "low_corr_selection": _select_low_corr_factors(
+            ordered_passing,
+            selection_payload["run_ids"],
+            selection_payload["matrix"],
+        ),
+        "sample_dates": sample_dates,
+        "n_bars": heatmap_payload["n_bars"],
         "basis": "mean bar-wise Pearson corr on latest 60 shared days",
+        "trend_rows": trend_rows,
+        "trend_basis": "corr to prior passing factors using pooled daily cross-sectional Pearson corr on latest 60 shared days",
         "updated_at": pd.Timestamp.now().isoformat(),
     }
     CORRELATION_CACHE_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

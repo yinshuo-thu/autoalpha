@@ -9,6 +9,17 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-24T22:30:00+08:00',
+    title: '修复因子相关性时序图不全 & 热图乱序问题',
+    summary: '彻底修复两个长期 bug：时序图因 validRunIds 二次过滤导致部分通过因子丢失；热图行列顺序依赖后端缓存顺序而非生成时序。后端同时修复 heatmap_stale 被 trend_stale 短路跳过的逻辑 bug。',
+    tags: ['Frontend', 'Backend', 'Bugfix', 'Correlation'],
+    bullets: [
+      'frontend: buildFactorCorrelationTrend 移除 validRunIds 过滤——trend_rows 已由后端保证只含通过因子，前端不应二次过滤。',
+      'frontend: CorrelationHeatmap 在渲染前按 factorOrdinalByRunId 重排行列，确保横纵轴始终是 created_at 时序顺序，不依赖后端缓存内部顺序。',
+      'backend: load_factor_correlation_cache 修复逻辑 bug——当 heatmap_stale=True 时触发全量重建（含 trend_rows），而不是被 trend_stale 短路只刷新 trend_rows。',
+    ],
+  },
+  {
     timestamp: '2026-04-24T21:30:00+08:00',
     title: 'Model Lab 指标对齐因子口径 + 全模型相关性展示',
     summary: '统一 Model Lab 的 IC/IR/Score/TVR 展示口径（IC 已×100）；所有模型（含非最优 LGB 等）现在均计算与有效因子库的相关性，并可在整体因子输出卡片中点击查看。',

@@ -132,6 +132,22 @@ interface FactorCorrelationPayload {
   matrix: (number | null)[][];
   updated_at?: string;
   basis?: string;
+  trend_basis?: string;
+  trend_rows?: Array<{
+    index: number;
+    label?: string;
+    run_id: string;
+    created_at?: string;
+    generation?: number;
+    tested_index?: number;
+    score?: number;
+    ic?: number;
+    avg_corr: number;
+    max_corr: number;
+    min_corr: number;
+    pair_count?: number;
+    basis?: string;
+  }>;
   low_corr_selection?: LowCorrSelection;
 }
 
@@ -729,10 +745,30 @@ const RedundancySummary = ({ redundancy }: { redundancy?: Record<string, any> })
   );
 };
 
-const CorrelationHeatmap = ({ labels, matrix }: { labels: string[]; matrix: (number | null)[][] }) => {
+const CorrelationHeatmap = ({
+  labels,
+  runIds,
+  matrix,
+  factorOrdinalByRunId,
+  onSelectRunId,
+}: {
+  labels: string[];
+  runIds?: string[];
+  matrix: (number | null)[][];
+  factorOrdinalByRunId: Map<string, number>;
+  onSelectRunId: (runId: string) => void;
+}) => {
   if (!labels.length || !matrix.length) {
     return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">暂无相关性数据</div>;
   }
+  const rawIds = runIds?.length ? runIds : labels;
+  // Re-sort rows/columns by chronological generation order, independent of backend cache order.
+  const sortedPerm = rawIds
+    .map((id, i) => ({ i, ord: factorOrdinalByRunId.get(id) ?? i + 1 }))
+    .sort((a, b) => a.ord - b.ord)
+    .map((x) => x.i);
+  const ids = sortedPerm.map((i) => rawIds[i]);
+  const sortedMatrix = sortedPerm.map((ri) => sortedPerm.map((ci) => matrix[ri]?.[ci] ?? null));
   const cellColor = (v: number | null) => {
     if (v === null || v === undefined) return '#f8fafc';
     const abs = Math.abs(v);
@@ -745,30 +781,50 @@ const CorrelationHeatmap = ({ labels, matrix }: { labels: string[]; matrix: (num
     if (v === null || v === undefined) return '#94a3b8';
     return Math.abs(v) >= 0.4 ? '#fff' : '#334155';
   };
-  const shortLabel = (lbl: string) => lbl.slice(-8);
+  const orderLabel = (runId: string, fallbackIndex: number) => String(factorOrdinalByRunId.get(runId) ?? fallbackIndex + 1);
+  const factorLabel = (runId: string, fallbackIndex: number) => `#${orderLabel(runId, fallbackIndex)}`;
   return (
     <div className="overflow-auto">
       <table className="text-[10px] border-collapse w-full">
         <thead>
           <tr>
             <th className="p-1 text-left text-muted-foreground w-8"></th>
-            {labels.map((lbl) => (
-              <th key={lbl} className="p-1 text-center text-muted-foreground font-normal" title={lbl}>
-                {shortLabel(lbl)}
+            {ids.map((runId, index) => (
+              <th
+                key={runId}
+                className="p-1 text-center text-muted-foreground font-normal"
+                title={`第 ${orderLabel(runId, index)} 个生成因子 · ${runId} · 点击打开因子卡片`}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelectRunId(runId)}
+                  className="rounded px-1 font-mono text-[10px] text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-900"
+                >
+                  {factorLabel(runId, index)}
+                </button>
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {matrix.map((row, ri) => (
-            <tr key={labels[ri]}>
-              <td className="p-1 text-muted-foreground whitespace-nowrap" title={labels[ri]}>
-                {shortLabel(labels[ri])}
+          {sortedMatrix.map((row, ri) => (
+            <tr key={ids[ri] ?? ri}>
+              <td
+                className="p-1 text-muted-foreground whitespace-nowrap"
+                title={`第 ${orderLabel(ids[ri], ri)} 个生成因子 · ${ids[ri]} · 点击打开因子卡片`}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelectRunId(ids[ri])}
+                  className="rounded px-1 font-mono text-[10px] text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-900"
+                >
+                  {factorLabel(ids[ri], ri)}
+                </button>
               </td>
               {row.map((val, ci) => (
                 <td
                   key={ci}
-                  title={`${labels[ri]} × ${labels[ci]}: ${val !== null ? val.toFixed(3) : 'N/A'}`}
+                  title={`${factorLabel(ids[ri], ri)} (${ids[ri]}) × ${factorLabel(ids[ci], ci)} (${ids[ci]}): ${val !== null ? val.toFixed(3) : 'N/A'}`}
                   style={{ backgroundColor: cellColor(val), color: textColor(val) }}
                   className="p-0.5 text-center font-mono font-semibold transition-all"
                 >
@@ -784,16 +840,42 @@ const CorrelationHeatmap = ({ labels, matrix }: { labels: string[]; matrix: (num
 };
 
 function buildFactorCorrelationTrend(payload: FactorCorrelationPayload | undefined | null, factors: KbFactor[]) {
-  if (!payload?.matrix?.length) return [];
+  if (!payload?.matrix?.length && !payload?.trend_rows?.length) return [];
+
+  const factorMetaById = new Map(
+    [...factors]
+      .sort(
+        (a, b) =>
+          String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+          String(a.run_id || '').localeCompare(String(b.run_id || ''))
+      )
+      .map((factor, index) => [
+        factor.run_id,
+        {
+          generation: Number(factor.generation || 0),
+          testedIndex: index + 1,
+        },
+      ])
+  );
+
+  if (payload.trend_rows?.length) {
+    return payload.trend_rows
+      .filter((row) => row && row.run_id)
+      .sort((a, b) => Number(a.index || 0) - Number(b.index || 0))
+      .map((row, orderIndex) => ({
+        index: Number(row.index || orderIndex + 1),
+        label: row.label || `#${Number(row.index || orderIndex + 1)}`,
+        run_id: row.run_id,
+        generation: Number(factorMetaById.get(row.run_id)?.generation || row.generation || 0),
+        tested_index: Number(factorMetaById.get(row.run_id)?.testedIndex || row.tested_index || 0),
+        avg_corr: Number(Number(row.avg_corr || 0).toFixed(4)),
+        max_corr: Number(Number(row.max_corr || 0).toFixed(4)),
+        min_corr: Number(Number(row.min_corr || 0).toFixed(4)),
+      }));
+  }
 
   const runIds = payload.run_ids?.length ? payload.run_ids : payload.labels;
-  const validRunIds = new Set(
-    factors
-      .filter((factor) => factor.PassGates)
-      .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-      .map((factor) => factor.run_id)
-  );
-  const sourceIds = validRunIds.size ? runIds.filter((runId) => validRunIds.has(runId)) : runIds;
+  const sourceIds = runIds;
 
   return sourceIds
     .map((runId) => runIds.indexOf(runId))
@@ -808,12 +890,22 @@ function buildFactorCorrelationTrend(payload: FactorCorrelationPayload | undefin
         index: orderIndex + 1,
         label: `#${orderIndex + 1}`,
         run_id: runIds[matrixIndex],
+        generation: Number(factorMetaById.get(runIds[matrixIndex])?.generation || 0),
+        tested_index: Number(factorMetaById.get(runIds[matrixIndex])?.testedIndex || 0),
         avg_corr: Number(avg.toFixed(4)),
         max_corr: Number(Math.max(...values).toFixed(4)),
         min_corr: Number(Math.min(...values).toFixed(4)),
       };
     })
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
+}
+
+function hasFactorCorrelationPayload(payload: FactorCorrelationPayload | undefined | null) {
+  return Boolean(payload?.trend_rows?.length || payload?.labels?.length || payload?.matrix?.length);
+}
+
+function hasHeatmapMatrix(payload: FactorCorrelationPayload | undefined | null) {
+  return Boolean(payload?.labels?.length && payload?.matrix?.length);
 }
 
 const FactorCorrelationTrendChart = ({
@@ -824,7 +916,7 @@ const FactorCorrelationTrendChart = ({
   factors: KbFactor[];
 }) => {
   const rows = useMemo(
-    () => buildFactorCorrelationTrend(factorCorrelations?.labels?.length ? factorCorrelations : factorCorrelationFallback, factors),
+    () => buildFactorCorrelationTrend(hasFactorCorrelationPayload(factorCorrelations) ? factorCorrelations : factorCorrelationFallback, factors),
     [factorCorrelations, factors]
   );
 
@@ -840,7 +932,12 @@ const FactorCorrelationTrendChart = ({
         <YAxis domain={['dataMin - 0.05', 1]} tick={{ fontSize: 11 }} />
         <Tooltip
           formatter={(value: any) => formatMetric(value, 4)}
-          labelFormatter={(_, payload) => payload?.[0]?.payload?.run_id || ''}
+          labelFormatter={(_, payload) => {
+            const row = payload?.[0]?.payload as { run_id?: string; generation?: number; tested_index?: number } | undefined;
+            if (!row) return '';
+            const genLabel = row.generation && row.tested_index ? `Gen ${row.generation}/${row.tested_index}` : '';
+            return [row.run_id, genLabel].filter(Boolean).join(' · ');
+          }}
         />
         <Legend wrapperStyle={{ fontSize: 11 }} />
         <Line type="monotone" dataKey="max_corr" name="最大相关性" stroke="#ef4444" strokeWidth={2} dot={false} />
@@ -996,11 +1093,10 @@ const sourceLabel = (source: string) => {
   if (source === 'manual') return 'Manual';
   if (source === 'paper') return 'Paper';
   if (source === 'llm') return 'LLM';
-  if (source === 'future') return 'Future';
   return source;
 };
 
-const ALL_SOURCES = ['manual', 'paper', 'llm', 'future'] as const;
+const ALL_SOURCES = ['manual', 'paper', 'llm'] as const;
 
 function buildMarketStateChartData(card?: FactorCard) {
   const monthly = card?.monthly_ic?.monthly || [];
@@ -1092,16 +1188,15 @@ const InspirationStatsCharts = ({
     manual: '#2563eb',
     paper: '#059669',
     llm: '#7c3aed',
-    future: '#ea580c',
   };
   const [heatmapData, setHeatmapData] = useState<FactorCorrelationPayload | null>(
-    factorCorrelations?.labels?.length ? factorCorrelations : factorCorrelationFallback
+    hasHeatmapMatrix(factorCorrelations) ? (factorCorrelations ?? factorCorrelationFallback) : factorCorrelationFallback
   );
   const [heatmapError, setHeatmapError] = useState('');
 
   useEffect(() => {
-    if (factorCorrelations?.labels?.length) {
-      setHeatmapData(factorCorrelations);
+    if (hasHeatmapMatrix(factorCorrelations)) {
+      setHeatmapData(factorCorrelations ?? factorCorrelationFallback);
       setHeatmapError('');
       return;
     }
@@ -1130,6 +1225,19 @@ const InspirationStatsCharts = ({
   const lowCorrSelection = useMemo(
     () => buildLowCorrSelection(heatmapData, factors) ?? heatmapData?.low_corr_selection ?? null,
     [heatmapData, factors]
+  );
+  const factorOrdinalByRunId = useMemo(
+    () =>
+      new Map(
+        [...factors]
+          .sort(
+            (a, b) =>
+              String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+              String(a.run_id || '').localeCompare(String(b.run_id || ''))
+          )
+          .map((factor, index) => [factor.run_id, index + 1])
+      ),
+    [factors]
   );
 
   const bySource = useMemo(() => {
@@ -1202,11 +1310,17 @@ const InspirationStatsCharts = ({
       <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
         <div className="mb-3">
           <div className="text-sm font-medium text-foreground">因子相关性热图</div>
-          <div className="mt-1 text-xs text-muted-foreground">所有通过因子两两 alpha 相关系数；颜色越深相关性越高，红为正相关，蓝为负相关。</div>
+          <div className="mt-1 text-xs text-muted-foreground">所有通过因子两两 alpha 相关系数；横纵坐标显示生成序号，点击序号可直接打开对应因子卡片。颜色越深相关性越高，红为正相关，蓝为负相关。</div>
         </div>
         <div className="h-[240px] overflow-auto">
           {heatmapData ? (
-            <CorrelationHeatmap labels={heatmapData.labels} matrix={heatmapData.matrix} />
+            <CorrelationHeatmap
+              labels={heatmapData.labels}
+              runIds={heatmapData.run_ids}
+              matrix={heatmapData.matrix}
+              factorOrdinalByRunId={factorOrdinalByRunId}
+              onSelectRunId={onSelectRunId}
+            />
           ) : heatmapError ? (
             <div className="flex h-full items-center justify-center rounded-2xl bg-red-50 px-4 text-xs text-red-600">{heatmapError}</div>
           ) : (
@@ -1491,6 +1605,19 @@ export const AutoAlphaRecordsPage: React.FC = () => {
 
   const factors = knowledge?.factors ?? [];
   const deferredFactors = useDeferredValue(factors);
+  const factorOrdinalByRunId = useMemo(
+    () =>
+      new Map(
+        [...deferredFactors]
+          .sort(
+            (a, b) =>
+              String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+              String(a.run_id || '').localeCompare(String(b.run_id || ''))
+          )
+          .map((factor, index) => [factor.run_id, index + 1])
+      ),
+    [deferredFactors]
+  );
   const outputFiles = knowledge?.artifacts.output_files ?? [];
   const researchReports = knowledge?.artifacts.research_reports ?? [];
   const liveComparisonData = useMemo(() => buildLiveComparisonData(factors), [factors]);
@@ -1615,7 +1742,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
         </div>
       </Panel>
 
-      <Panel title="灵感源转化分析" subtitle="按 Manual、Paper、LLM 和 Future Markdown 追踪真实因子记录数、passing 因子数、通过率与有效因子贡献。">
+      <Panel title="灵感源转化分析" subtitle="按 Manual、Paper 和 LLM 追踪真实因子记录数、passing 因子数、通过率与有效因子贡献。">
         <InspirationStatsCharts
           stats={knowledge?.inspiration_stats}
           factors={factors}
@@ -1692,7 +1819,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
           <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
             <div className="mb-3">
               <div className="text-sm font-medium text-foreground">有效因子相关性时序</div>
-              <div className="mt-1 text-xs text-muted-foreground">横轴为第几个有效因子，纵轴为它与其他有效因子的相关性；平均线位于最大 / 最小相关性之间。</div>
+              <div className="mt-1 text-xs text-muted-foreground">横轴为通过 Gate 的出现顺序；每个点表示该因子在出现当时相对之前已通过因子的相关性统计，趋势序列会持久化到相关性缓存里，所以重启后仍会沿完整 passing 顺序继续展示。</div>
             </div>
             <div className="h-[420px]">
               <FactorCorrelationTrendChart factorCorrelations={knowledge?.factor_correlations} factors={factors} />
@@ -1832,7 +1959,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                 <th className="w-16 px-3 py-3 text-right">IR</th>
                 <th className="w-16 px-3 py-3 text-right">TVR</th>
                 <th className="w-16 px-3 py-3 text-center">Days</th>
-                <th className="w-16 px-3 py-3 text-center">Gen</th>
+                <th className="w-24 px-3 py-3 text-center">Gen/No.</th>
                 <th className="w-[30rem] px-3 py-3">Formula</th>
                 <th className="w-[22rem] px-3 py-3">Thought</th>
                 <th className="w-64 px-3 py-3">Status/Gate</th>
@@ -1868,7 +1995,9 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                       <td className="px-3 py-3 text-right font-mono text-foreground">{formatNumber(factor.IR, 3)}</td>
                       <td className="px-3 py-3 text-right font-mono text-foreground">{formatNumber(factor.tvr, 0)}</td>
                       <td className="px-3 py-3 text-center text-foreground">{factor.eval_days || '-'}</td>
-                      <td className="px-3 py-3 text-center text-foreground">{factor.generation}</td>
+                      <td className="px-3 py-3 text-center text-foreground">
+                        {factor.generation}/{factorOrdinalByRunId.get(factor.run_id) || '-'}
+                      </td>
                       <td className="px-3 py-3 align-top">
                         <HoverCard>
                           <HoverCardTrigger asChild>
