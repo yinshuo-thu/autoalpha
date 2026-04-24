@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   Bar,
@@ -164,6 +164,25 @@ interface ModelLabModelSummary {
     factor: string;
     importance: number;
   }>;
+  input_factor_correlations?: Array<{
+    run_id: string;
+    corr: number;
+    abs_corr: number;
+    score?: number;
+    ic?: number;
+    generation?: number;
+    formula?: string;
+  }>;
+  all_factor_correlations?: Array<{
+    run_id: string;
+    corr: number;
+    abs_corr: number;
+    score?: number;
+    ic?: number;
+    generation?: number;
+    formula?: string;
+    is_input_factor?: boolean;
+  }>;
 }
 
 interface ModelLabWindow {
@@ -212,6 +231,25 @@ interface ModelLabSummary {
   windows: ModelLabWindow[];
   models: Record<string, ModelLabModelSummary>;
   ensemble_outputs?: Record<string, string>;
+  best_model_input_factor_correlations?: Array<{
+    run_id: string;
+    corr: number;
+    abs_corr: number;
+    score?: number;
+    ic?: number;
+    generation?: number;
+    formula?: string;
+  }>;
+  best_model_all_factor_correlations?: Array<{
+    run_id: string;
+    corr: number;
+    abs_corr: number;
+    score?: number;
+    ic?: number;
+    generation?: number;
+    formula?: string;
+    is_input_factor?: boolean;
+  }>;
 }
 
 interface ModelLabPayload {
@@ -301,13 +339,6 @@ interface ManualFactor {
   gates_detail?: Record<string, boolean>;
   submission_path?: string;
   metadata_path?: string;
-}
-
-interface FactorCorrelationsData {
-  run_ids: string[];
-  labels: string[];
-  matrix: number[][];
-  updated_at: string;
 }
 
 interface EnsembleBacktestEntry {
@@ -712,6 +743,44 @@ function niceUpperBound(value: number, minUpper: number, padding = 1.25) {
   return step * magnitude;
 }
 
+function toLogConsensusValue(value: number) {
+  const safe = Math.max(Number(value) || 0, 0);
+  return Math.log10(1 + safe);
+}
+
+function formatLogConsensusTick(value: number) {
+  const restored = (10 ** Number(value)) - 1;
+  if (!Number.isFinite(restored) || restored <= 0) return '0';
+  if (restored >= 1000) return restored.toFixed(0);
+  if (restored >= 100) return restored.toFixed(0);
+  if (restored >= 10) return restored.toFixed(1);
+  return restored.toFixed(2);
+}
+
+function buildAbsCorrelationHistogram(
+  rows: Array<{ abs_corr?: number }>,
+  binCount = 10,
+) {
+  if (!rows.length) return [];
+  const bins = Array.from({ length: binCount }, (_, index) => ({
+    bucket: `${(index / binCount).toFixed(1)}-${((index + 1) / binCount).toFixed(1)}`,
+    count: 0,
+    inputCount: 0,
+  }));
+  rows.forEach((row: any) => {
+    const value = Math.max(0, Math.min(0.999999, Number(row.abs_corr) || 0));
+    const index = Math.min(binCount - 1, Math.floor(value * binCount));
+    bins[index].count += 1;
+    if (row.is_input_factor) bins[index].inputCount += 1;
+  });
+  return bins;
+}
+
+function suggestTargetValid(passingCount: number) {
+  if (!Number.isFinite(passingCount) || passingCount <= 0) return 0;
+  return Math.max(passingCount + 1, Math.ceil(passingCount * 1.5));
+}
+
 function compressProgressPoints(points: ProgressPoint[], maxPoints = 72) {
   if (points.length <= maxPoints) return points;
   if (maxPoints <= 1) return [points[points.length - 1]];
@@ -826,6 +895,9 @@ const StatCard = ({
 
 const LogPanel = ({ logs }: { logs: string[] }) => {
   const ref = useRef<HTMLDivElement>(null);
+  const taggedSegments = (line: string) => line.split(/(\[(?:Recall|Embeding|Embedding)\])/g).filter(Boolean);
+  const isRecallTag = (part: string) => part === '[Recall]';
+  const isEmbeddingTag = (part: string) => part === '[Embeding]' || part === '[Embedding]';
 
   useEffect(() => {
     if (ref.current) {
@@ -834,6 +906,8 @@ const LogPanel = ({ logs }: { logs: string[] }) => {
   }, [logs]);
 
   const colorLine = (line: string) => {
+    if (line.includes('[Recall]')) return 'text-cyan-300';
+    if (line.includes('[Embeding]') || line.includes('[Embedding]')) return 'text-fuchsia-300';
     if (line.includes('ERROR') || line.includes('[ERROR]')) return 'text-red-500';
     if (line.includes('WARN') || line.includes('[WARN]')) return 'text-amber-500';
     if (line.includes('PassGates=True') || line.includes('LOOP COMPLETE') || line.includes('passing=')) {
@@ -850,7 +924,29 @@ const LogPanel = ({ logs }: { logs: string[] }) => {
       ) : (
         logs.map((line, index) => (
           <div key={`${line}-${index}`} className={`mb-1 whitespace-pre-wrap break-words leading-5 [overflow-wrap:anywhere] ${colorLine(line)}`}>
-            {line}
+            {taggedSegments(line).map((part, partIndex) => {
+              if (isRecallTag(part)) {
+                return (
+                  <span
+                    key={`${index}-${partIndex}-${part}`}
+                    className="mr-2 inline-flex rounded-full border border-cyan-400/40 bg-cyan-400/15 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-cyan-200"
+                  >
+                    [Recall]
+                  </span>
+                );
+              }
+              if (isEmbeddingTag(part)) {
+                return (
+                  <span
+                    key={`${index}-${partIndex}-${part}`}
+                    className="mr-2 inline-flex rounded-full border border-fuchsia-400/40 bg-fuchsia-400/15 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-fuchsia-200"
+                  >
+                    [Embeding]
+                  </span>
+                );
+              }
+              return <span key={`${index}-${partIndex}`}>{part}</span>;
+            })}
           </div>
         ))
       )}
@@ -948,36 +1044,14 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
   );
 };
 
-function getSelectedFactorCorrelations(
-  selectedRunIds: string[],
-  corrData: FactorCorrelationsData,
-): Array<{ a: string; b: string; corr: number }> {
-  const pairs: Array<{ a: string; b: string; corr: number }> = [];
-  for (let i = 0; i < selectedRunIds.length; i++) {
-    const idxA = corrData.run_ids.indexOf(selectedRunIds[i]);
-    if (idxA === -1) continue;
-    for (let j = i + 1; j < selectedRunIds.length; j++) {
-      const idxB = corrData.run_ids.indexOf(selectedRunIds[j]);
-      if (idxB === -1) continue;
-      const corr = corrData.matrix[idxA]?.[idxB];
-      if (corr !== undefined && corr !== null && Number.isFinite(corr)) {
-        pairs.push({ a: selectedRunIds[i], b: selectedRunIds[j], corr });
-      }
-    }
-  }
-  return pairs.sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr));
-}
-
 const EnsembleModal = ({
   modelName,
   modelLab,
-  factorCorrelations,
   onOpenFactor,
   onClose,
 }: {
   modelName: string;
   modelLab: ModelLabSummary;
-  factorCorrelations: FactorCorrelationsData;
   onOpenFactor: (runId: string) => void;
   onClose: () => void;
 }) => {
@@ -988,9 +1062,32 @@ const EnsembleModal = ({
   const [saved, setSaved] = useState(false);
   const modelPayload = modelLab.models?.[modelName];
   const path = modelLab.ensemble_outputs?.[modelName] || '';
-  const selectedRunIds = (modelLab.selected_factors || []).map((f) => f.run_id);
-  const correlationPairs = getSelectedFactorCorrelations(selectedRunIds, factorCorrelations);
   const isBest = modelName === modelLab.best_model;
+  const inputCorrelations = (modelPayload?.input_factor_correlations || []).slice(0, 10);
+  const allFactorCorrelations = (
+    modelPayload?.all_factor_correlations
+    || (isBest ? modelLab.best_model_all_factor_correlations : [])
+    || []
+  );
+  const topAllFactorCorrelations = allFactorCorrelations.slice(0, 12);
+  const allFactorCorrelationHistogram = buildAbsCorrelationHistogram(allFactorCorrelations);
+  const allFactorCorrelationStats = useMemo(() => {
+    if (!allFactorCorrelations.length) return null;
+    const values = allFactorCorrelations.map((item) => Number(item.abs_corr || 0)).sort((a, b) => a - b);
+    const quantile = (q: number) => {
+      if (!values.length) return 0;
+      const index = Math.min(values.length - 1, Math.max(0, Math.floor((values.length - 1) * q)));
+      return values[index];
+    };
+    return {
+      count: values.length,
+      max: values[values.length - 1] || 0,
+      median: quantile(0.5),
+      p90: quantile(0.9),
+      over07: allFactorCorrelations.filter((item) => Number(item.abs_corr || 0) >= 0.7).length,
+      over05: allFactorCorrelations.filter((item) => Number(item.abs_corr || 0) >= 0.5).length,
+    };
+  }, [allFactorCorrelations]);
 
   const saveBacktest = () => {
     try {
@@ -1064,18 +1161,92 @@ const EnsembleModal = ({
           </div>
         ) : null}
 
-        {correlationPairs.length > 0 ? (
+        {inputCorrelations.length > 0 ? (
           <div className="mb-4 rounded-2xl bg-slate-50 p-3">
-            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">入模因子相关性（绝对值降序，前 6 对）</div>
-            <div className="space-y-1.5">
-              {correlationPairs.slice(0, 6).map(({ a, b, corr }) => (
-                <div key={`${a}-${b}`} className="flex items-center gap-2 text-[11px]">
-                  <span className="w-[40%] truncate font-mono text-slate-600">{a}</span>
-                  <span className="text-muted-foreground">↔</span>
-                  <span className="w-[40%] truncate font-mono text-slate-600">{b}</span>
-                  <span className={`ml-auto shrink-0 font-semibold ${Math.abs(corr) > 0.7 ? 'text-amber-600' : Math.abs(corr) > 0.4 ? 'text-sky-600' : 'text-emerald-600'}`}>
-                    {corr.toFixed(3)}
-                  </span>
+            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              {isBest ? '最佳模型因子 vs 入模因子相关性分布' : '模型因子 vs 入模因子相关性分布'}
+            </div>
+            <div className="mb-3 text-[11px] leading-5 text-slate-500">
+              这里展示的是当前模型最终输出信号与各入模原始因子的相关性，不再计算入模因子之间的两两相关。
+            </div>
+            <div className="h-[220px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={[...inputCorrelations].reverse()} layout="vertical" margin={{ top: 4, right: 18, bottom: 4, left: 6 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis type="number" domain={[-1, 1]} tick={{ fill: '#64748b', fontSize: 10 }} />
+                  <YAxis type="category" dataKey="run_id" width={108} tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={compactFeatureLabel} />
+                  <Tooltip
+                    formatter={(value: number) => [formatNumber(Number(value), 3), '相关性']}
+                    labelFormatter={(label, payload) => String((payload?.[0]?.payload as { run_id?: string } | undefined)?.run_id || label)}
+                  />
+                  <Bar dataKey="corr" radius={[0, 6, 6, 0]}>
+                    {[...inputCorrelations].reverse().map((item) => (
+                      <Cell key={item.run_id} fill={item.corr >= 0 ? '#0ea5e9' : '#f97316'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="mt-3 space-y-1.5">
+              {inputCorrelations.slice(0, 6).map((item) => (
+                <div key={item.run_id} className="flex items-center gap-2 text-[11px]">
+                  <button
+                    onClick={() => { onOpenFactor(item.run_id); onClose(); }}
+                    className="min-w-0 truncate font-mono text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                  >
+                    {item.run_id}
+                  </button>
+                  <span className="ml-auto shrink-0 font-semibold text-slate-700">{formatNumber(item.corr, 3)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {allFactorCorrelations.length > 0 ? (
+          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              pq 文件 vs 其他有效因子相关性分布
+            </div>
+            <div className="mb-3 text-[11px] leading-5 text-slate-500">
+              这里展示导出的整体合成 pq 文件与当前全部有效因子的相关性分布。蓝色柱表示该区间内全部有效因子数，青绿色叠层表示其中属于当前入模集合的因子。
+            </div>
+            {allFactorCorrelationStats ? (
+              <div className="mb-3 grid grid-cols-3 gap-2 text-[11px] text-slate-600">
+                <div>样本数 {allFactorCorrelationStats.count}</div>
+                <div>中位 |corr| {formatNumber(allFactorCorrelationStats.median, 3)}</div>
+                <div>P90 |corr| {formatNumber(allFactorCorrelationStats.p90, 3)}</div>
+                <div>最大 |corr| {formatNumber(allFactorCorrelationStats.max, 3)}</div>
+                <div>|corr| ≥ 0.5: {allFactorCorrelationStats.over05}</div>
+                <div>|corr| ≥ 0.7: {allFactorCorrelationStats.over07}</div>
+              </div>
+            ) : null}
+            <div className="h-[220px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={allFactorCorrelationHistogram} margin={{ top: 4, right: 12, bottom: 10, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="bucket" tick={{ fill: '#64748b', fontSize: 10 }} />
+                  <YAxis tick={{ fill: '#64748b', fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip />
+                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  <Bar dataKey="count" name="全部有效因子" fill="#60a5fa" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="inputCount" name="其中入模因子" fill="#14b8a6" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="mt-3 space-y-1.5">
+              {topAllFactorCorrelations.slice(0, 8).map((item) => (
+                <div key={item.run_id} className="flex items-center gap-2 text-[11px]">
+                  <button
+                    onClick={() => { onOpenFactor(item.run_id); onClose(); }}
+                    className="min-w-0 truncate font-mono text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                  >
+                    {item.run_id}
+                  </button>
+                  {item.is_input_factor ? (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] text-emerald-700">input</span>
+                  ) : null}
+                  <span className="ml-auto shrink-0 font-semibold text-slate-700">{formatNumber(item.corr, 3)}</span>
                 </div>
               ))}
             </div>
@@ -1134,12 +1305,12 @@ export const AutoAlphaPage: React.FC = () => {
   const [balance, setBalance] = useState<BalancePayload | null>(null);
   const [modelLab, setModelLab] = useState<ModelLabPayload | null>(null);
   const [inspirations, setInspirations] = useState<InspirationPayload | null>(null);
-  const [factorCorrelations, setFactorCorrelations] = useState<FactorCorrelationsData>({ run_ids: [], labels: [], matrix: [], updated_at: '' });
   const [ensembleModalModel, setEnsembleModalModel] = useState<string | null>(null);
   const [rounds, setRounds] = useState(10);
   const [ideas, setIdeas] = useState(4);
   const [days, setDays] = useState(0);
   const [targetValid, setTargetValid] = useState(0);
+  const [targetValidSource, setTargetValidSource] = useState<'auto' | 'config' | 'manual'>('auto');
   const [promptTitle, setPromptTitle] = useState('');
   const [promptInput, setPromptInput] = useState('');
   const [promptBusy, setPromptBusy] = useState(false);
@@ -1148,31 +1319,63 @@ export const AutoAlphaPage: React.FC = () => {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [pageMessage, setPageMessage] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const secondaryPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     let mounted = true;
+    let coreInflight = false;
+    let secondaryInflight = false;
 
-    const loadAll = async () => {
-      const [statusResult, knowledgeResult, balanceResult, modelLabResult, inspirationResult, corrResult] = await Promise.allSettled([
-        fetchJson<LoopStatus>('/api/autoalpha/loop/status'),
-        fetchJson<KnowledgePayload>('/api/autoalpha/knowledge'),
-        fetchJson<BalancePayload>('/api/autoalpha/balance'),
-        fetchJson<ModelLabPayload>('/api/autoalpha/model-lab'),
-        fetchJson<InspirationPayload>('/api/autoalpha/inspirations'),
-        fetchJson<FactorCorrelationsData>('/api/autoalpha/factor-correlations'),
-      ]);
-
-      if (!mounted) return;
-      if (statusResult.status === 'fulfilled') setStatus(statusResult.value);
-      if (knowledgeResult.status === 'fulfilled') setKnowledge(knowledgeResult.value);
-      if (balanceResult.status === 'fulfilled') setBalance(balanceResult.value);
-      if (modelLabResult.status === 'fulfilled') setModelLab(modelLabResult.value);
-      if (inspirationResult.status === 'fulfilled') setInspirations(inspirationResult.value);
-      if (corrResult.status === 'fulfilled') setFactorCorrelations(corrResult.value);
+    const loadCore = async () => {
+      if (coreInflight || document.hidden) return;
+      coreInflight = true;
+      try {
+        const [statusResult, knowledgeResult] = await Promise.allSettled([
+          fetchJson<LoopStatus>('/api/autoalpha/loop/status'),
+          fetchJson<KnowledgePayload>('/api/autoalpha/knowledge?compact_factors=1&include_factor_correlations=0&include_artifacts=0&include_generation_experiences=0'),
+        ]);
+        if (!mounted) return;
+        startTransition(() => {
+          if (statusResult.status === 'fulfilled') setStatus(statusResult.value);
+          if (knowledgeResult.status === 'fulfilled') setKnowledge(knowledgeResult.value);
+        });
+      } finally {
+        coreInflight = false;
+      }
     };
 
-    loadAll();
-    pollRef.current = setInterval(loadAll, 4000);
+    const loadSecondary = async () => {
+      if (secondaryInflight || document.hidden) return;
+      secondaryInflight = true;
+      try {
+        const [balanceResult, modelLabResult, inspirationResult] = await Promise.allSettled([
+          fetchJson<BalancePayload>('/api/autoalpha/balance'),
+          fetchJson<ModelLabPayload>('/api/autoalpha/model-lab'),
+          fetchJson<InspirationPayload>('/api/autoalpha/inspirations'),
+        ]);
+        if (!mounted) return;
+        startTransition(() => {
+          if (balanceResult.status === 'fulfilled') setBalance(balanceResult.value);
+          if (modelLabResult.status === 'fulfilled') setModelLab(modelLabResult.value);
+          if (inspirationResult.status === 'fulfilled') setInspirations(inspirationResult.value);
+        });
+      } finally {
+        secondaryInflight = false;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        void loadCore();
+        void loadSecondary();
+      }
+    };
+
+    void loadCore();
+    void loadSecondary();
+    pollRef.current = setInterval(loadCore, 6000);
+    secondaryPollRef.current = setInterval(loadSecondary, 20000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     fetchJson<RuntimeConfigPayload>('/api/system/config')
       .then((cfg) => {
@@ -1180,18 +1383,42 @@ export const AutoAlphaPage: React.FC = () => {
         setRounds(Number(env.AUTOALPHA_DEFAULT_ROUNDS || 10));
         setIdeas(Number(env.AUTOALPHA_DEFAULT_IDEAS || 4));
         setDays(Number(env.AUTOALPHA_DEFAULT_DAYS || 0));
-        setTargetValid(Number(env.AUTOALPHA_DEFAULT_TARGET_VALID || 0));
+        const configuredTarget = Math.max(
+          0,
+          Number(env.AUTOALPHA_DEFAULT_TARGET_VALID || env.AUTOALPHA_ROLLING_TARGET_VALID || 0)
+        );
+        if (configuredTarget > 0) {
+          setTargetValid(configuredTarget);
+          setTargetValidSource('config');
+        }
       })
       .catch(() => {});
 
     return () => {
       mounted = false;
       if (pollRef.current) clearInterval(pollRef.current);
+      if (secondaryPollRef.current) clearInterval(secondaryPollRef.current);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 
   const isRunning = status?.is_running ?? false;
   const factors = knowledge?.factors ?? [];
+  const currentPassingCount = Math.max(
+    status?.total_passing ?? 0,
+    knowledge?.total_passing ?? 0,
+    factors.filter((factor) => factor.PassGates).length
+  );
+  const suggestedTargetValid = useMemo(
+    () => suggestTargetValid(currentPassingCount),
+    [currentPassingCount]
+  );
+
+  useEffect(() => {
+    if (targetValidSource !== 'auto') return;
+    setTargetValid(suggestedTargetValid);
+  }, [suggestedTargetValid, targetValidSource]);
+
   const progressPoints = useMemo(
     () => resolveProgressPoints(knowledge?.progress_points ?? [], factors, status, knowledge),
     [knowledge, factors, status]
@@ -1214,8 +1441,10 @@ export const AutoAlphaPage: React.FC = () => {
     },
     [progressPoints]
   );
-  const passingAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.passing), 0), 60);
-  const passRateAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.pass_rate), 0), 5);
+  const maxPassingCount = Math.max(...progressChartPoints.map((point) => point.passing), 0);
+  const passingAxisMax = Math.max(maxPassingCount > 0 ? Math.ceil(maxPassingCount * 1.5) : 0, 10);
+  const maxPassRate = Math.max(...progressChartPoints.map((point) => point.pass_rate), 0);
+  const passRateAxisMax = Math.max(maxPassRate > 0 ? Math.ceil(maxPassRate * 2) : 0, 1);
   const efficiencyAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.generation_efficiency), 0), 5);
   const latestModelLab = modelLab?.latest ?? null;
   const modelLabCurve = buildMergedModelCurves(latestModelLab?.models);
@@ -1227,8 +1456,15 @@ export const AutoAlphaPage: React.FC = () => {
     () => buildFeatureConsensus(latestModelLab?.models, latestModelLab?.selected_factors),
     [latestModelLab]
   );
+  const featureConsensusChartData = useMemo(
+    () => [...featureConsensus].reverse().map((item) => ({
+      ...item,
+      logConsensusImportance: Number(toLogConsensusValue(item.consensusImportance).toFixed(6)),
+    })),
+    [featureConsensus]
+  );
   const featureConsensusAxisMax = niceUpperBound(
-    Math.max(...featureConsensus.map((item) => item.consensusImportance), 0),
+    Math.max(...featureConsensusChartData.map((item) => item.logConsensusImportance), 0),
     1
   );
   const topConsensusFeature = featureConsensus[0];
@@ -1253,7 +1489,7 @@ export const AutoAlphaPage: React.FC = () => {
   const icHistogram = buildHistogram(
     factors.filter((factor) => factor.status === 'ok').map((factor) => factor.IC),
     5,
-    1
+    2
   );
 
   const modelComparison = Object.entries(latestModelLab?.models || {}).map(([modelName, payload]) => ({
@@ -1366,7 +1602,7 @@ export const AutoAlphaPage: React.FC = () => {
           <StatCard label="已测试因子" value={String(status?.total_tested ?? 0)} helper="累计知识库记录" />
           <StatCard label="通过 Gate" value={String(status?.total_passing ?? 0)} helper={`通过率 ${formatPercent(knowledge?.pass_rate ?? 0)}`} accent="bg-emerald-50" />
           <StatCard label="最佳 Score" value={formatNumber(status?.best_score ?? 0, 2)} helper="按云端一致口径显示" accent="bg-sky-50" />
-      <StatCard label="Ideas" value={String(inspirations?.count ?? 0)} helper="Manual / Paper / LLM / Future" accent="bg-violet-50" />
+      <StatCard label="Ideas" value={String(inspirations?.count ?? 0)} helper="Manual / Paper / LLM" accent="bg-violet-50" />
           <StatCard label="Rolling 窗口" value={String(latestModelLab?.window_count ?? 0)} helper={latestModelLab ? `${latestModelLab.best_model} 最优` : '等待实验结果'} accent="bg-amber-50" />
         </div>
       </Panel>
@@ -1718,8 +1954,21 @@ export const AutoAlphaPage: React.FC = () => {
             </label>
             <label className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4 text-sm">
               <div className="text-xs text-muted-foreground">目标有效因子</div>
-              <input type="number" min={0} max={1000} value={targetValid} onChange={(event) => setTargetValid(Math.max(0, Number(event.target.value)))} disabled={isRunning} className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50" />
-              <div className="mt-2 text-[11px] text-muted-foreground">0 表示不设目标</div>
+              <input
+                type="number"
+                min={0}
+                max={1000}
+                value={targetValid}
+                onChange={(event) => {
+                  setTargetValid(Math.max(0, Number(event.target.value)));
+                  setTargetValidSource('manual');
+                }}
+                disabled={isRunning}
+                className="mt-3 w-full rounded-2xl border border-border/60 bg-slate-50 px-3 py-2 text-base outline-none disabled:opacity-50"
+              />
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                当前自动建议 {suggestedTargetValid || 0}；手动填 0 表示不设目标
+              </div>
             </label>
           </div>
 
@@ -1733,7 +1982,7 @@ export const AutoAlphaPage: React.FC = () => {
           </div>
 
           <div className="mt-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
-            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '状态轮询间隔 4 秒'} valueClassName="text-xl" />
+            <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '轻量状态轮询间隔 6 秒'} valueClassName="text-xl" />
             <StatCard label="云端一致说明" value="TVR / Score 已对齐" helper="submission-like 提交评分链路" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
           </div>
 
@@ -1757,58 +2006,6 @@ export const AutoAlphaPage: React.FC = () => {
           </div>
 
           <div className="mt-5 grid min-w-0 gap-5">
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-1 text-sm font-medium text-foreground">真实策略累计 PnL 曲线</div>
-              <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                这里改成了和预测多空分组一致的真实多空组合口径：每日做多预测最高分组、做空最低分组，并在上方同步展示对应回撤。
-              </div>
-              <div className="space-y-3">
-                <div className="h-[150px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart syncId="model-lab-pnl" data={modelLabDrawdownCurve} margin={{ top: 8, right: 28, bottom: 4, left: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="date" hide />
-                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
-                      <Legend />
-                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
-                        <Line
-                          key={`dd-${modelName}`}
-                          type="monotone"
-                          dataKey={modelName}
-                          name={`${modelName} 回撤`}
-                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
-                          strokeWidth={2}
-                          dot={false}
-                        />
-                      ))}
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart syncId="model-lab-pnl" data={modelLabCurve} margin={{ top: 12, right: 28, bottom: 18, left: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatRollingDate} minTickGap={28} />
-                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
-                      <Legend />
-                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
-                        <Line
-                          key={modelName}
-                          type="monotone"
-                          dataKey={modelName}
-                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
-                          strokeWidth={2.5}
-                          dot={false}
-                        />
-                      ))}
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            </div>
-
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
               <div className="mb-1 text-sm font-medium text-foreground">Rolling 预测时序对比</div>
               <div className="mb-3 text-xs leading-5 text-muted-foreground">
@@ -1892,6 +2089,58 @@ export const AutoAlphaPage: React.FC = () => {
                 </ResponsiveContainer>
               </div>
             </div>
+
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 text-sm font-medium text-foreground">真实策略累计 PnL 曲线</div>
+              <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                这里改成了和预测多空分组一致的真实多空组合口径：每日做多预测最高分组、做空最低分组，并把这张图放到 Sharpe / PnL 对比之后，作为四张核心图的最后一张。
+              </div>
+              <div className="space-y-3">
+                <div className="h-[150px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart syncId="model-lab-pnl" data={modelLabDrawdownCurve} margin={{ top: 8, right: 28, bottom: 4, left: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" hide />
+                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
+                      <Legend />
+                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
+                        <Line
+                          key={`dd-${modelName}`}
+                          type="monotone"
+                          dataKey={modelName}
+                          name={`${modelName} 回撤`}
+                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
+                          strokeWidth={2}
+                          dot={false}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="h-[300px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart syncId="model-lab-pnl" data={modelLabCurve} margin={{ top: 12, right: 28, bottom: 18, left: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatRollingDate} minTickGap={28} />
+                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <Tooltip labelFormatter={(value) => formatRollingDate(String(value))} />
+                      <Legend />
+                      {Object.keys(latestModelLab?.models || {}).map((modelName, index) => (
+                        <Line
+                          key={modelName}
+                          type="monotone"
+                          dataKey={modelName}
+                          stroke={MODEL_COLORS[index % MODEL_COLORS.length]}
+                          strokeWidth={2.5}
+                          dot={false}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="mt-5 grid min-w-0 items-start gap-5 lg:grid-cols-2">
@@ -1955,12 +2204,12 @@ export const AutoAlphaPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+              <div className="mt-4 space-y-3">
                 <div className="rounded-2xl border border-border/50 bg-white/80 p-3 text-[11px] leading-6 text-slate-600">
                   <span className="font-medium text-slate-800">共识分</span>
                   {` = Σ(单模型 importance × 模型表现权重 × 排名加成)。`}
                   {` 模型表现权重≈max(0.7, 1 + Avg IC×10 + Sharpe×0.06)，排名加成会让 top1 比 top8 更重。`}
-                  {` 所以它不是单模型 importance，而是"重要性 × 覆盖度 × 模型质量"的家族级汇总分。`}
+                  {` 所以它不是单模型 importance，而是"重要性 × 覆盖度 × 模型质量"的家族级汇总分。图上横轴已改为对数刻度，便于同时看清头部与尾部差异。`}
                 </div>
                 <div className="rounded-2xl border border-border/50 bg-white/80 p-3 text-[11px] leading-6 text-slate-600">
                   <span className="font-medium text-slate-800">颜色只表示覆盖模型比例</span>
@@ -1977,23 +2226,28 @@ export const AutoAlphaPage: React.FC = () => {
                 {featureConsensus.length ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart
-                      data={[...featureConsensus].reverse()}
+                      data={featureConsensusChartData}
                       layout="vertical"
                       margin={{ top: 8, right: 20, bottom: 8, left: 10 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis type="number" domain={[0, featureConsensusAxisMax]} tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <XAxis
+                        type="number"
+                        domain={[0, featureConsensusAxisMax]}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        tickFormatter={formatLogConsensusTick}
+                      />
                       <YAxis type="category" dataKey="shortLabel" width={92} tick={{ fill: '#64748b', fontSize: 11 }} />
                       <Tooltip
-                        formatter={(value: number) => [formatNumber(Number(value), 3), '共识分']}
+                        formatter={(_, __, item) => [formatNumber(Number((item?.payload as FeatureConsensusPoint | undefined)?.consensusImportance || 0), 3), '共识分']}
                         labelFormatter={(label, payload) => {
                           const item = payload?.[0]?.payload as FeatureConsensusPoint | undefined;
                           if (!item) return String(label);
                           return `${item.factor} | ${item.models.length}/${modelCount || item.models.length} 模型 | ${item.dominantTrackLabel}`;
                         }}
                       />
-                      <Bar dataKey="consensusImportance" radius={[0, 8, 8, 0]}>
-                        {([...featureConsensus].reverse()).map((item) => (
+                      <Bar dataKey="logConsensusImportance" radius={[0, 8, 8, 0]}>
+                        {featureConsensusChartData.map((item) => (
                           <Cell key={item.factor} fill={featureConsensusColor(item.supportRatio)} />
                         ))}
                       </Bar>
@@ -2149,7 +2403,6 @@ export const AutoAlphaPage: React.FC = () => {
         <EnsembleModal
           modelName={ensembleModalModel}
           modelLab={latestModelLab}
-          factorCorrelations={factorCorrelations}
           onOpenFactor={setSelectedRunId}
           onClose={() => setEnsembleModalModel(null)}
         />

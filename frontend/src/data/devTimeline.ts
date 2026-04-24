@@ -9,6 +9,17 @@ export interface DevTimelineEntry {
 // 后续每次“修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-24T20:00:00+08:00',
+    title: 'Fix IC 分布 x 轴精度问题',
+    summary: 'IC 分布直方图 tickLabel 由 1 位小数改为 2 位，避免 bin 中点四舍五入后误导最大值显示。',
+    tags: ['Frontend', 'AutoAlpha', 'Bugfix'],
+    bullets: [
+      'buildHistogram 对 IC 的 digits 参数从 1 改为 2，tickLabel 和 tooltip label 均更精确。',
+      '修复前：实际 max IC=1.18 时最后一个 bin 中点显示为 "1.1"，让人误读范围。',
+      '修复后：显示 "1.07"，tooltip 也正确展示 "0.95 ~ 1.18" 的实际 bin 边界。',
+    ],
+  },
+  {
     timestamp: '2026-04-24T18:20:00+08:00',
     title: 'DEV 时间线回填 RAG 机制细节',
     summary: '不再单独维护 RAG block，而是把当前真实运行中的 RAG 机制按时间线补回原有节点，包括 query-aware 召回、Embedding 回退、auto compact 和公式 prompt 的组装顺序。',
