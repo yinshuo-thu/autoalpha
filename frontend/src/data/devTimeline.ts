@@ -6,8 +6,20 @@ export interface DevTimelineEntry {
   bullets: string[];
 }
 
-// 后续每次“修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
+// 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
+  {
+    timestamp: '2026-04-24T21:30:00+08:00',
+    title: 'Model Lab 指标对齐因子口径 + 全模型相关性展示',
+    summary: '统一 Model Lab 的 IC/IR/Score/TVR 展示口径（IC 已×100）；所有模型（含非最优 LGB 等）现在均计算与有效因子库的相关性，并可在整体因子输出卡片中点击查看。',
+    tags: ['Model Lab', 'Backend', 'Frontend'],
+    bullets: [
+      '后端：_evaluate_predictions 增加 daily_ic_ir / daily_rank_ic_ir；模型汇总新增 avg_ir、avg_daily_ic_bps、avg_daily_rank_ic_bps（×100 口径）。',
+      '后端：新增 _compute_pred_series_all_factor_correlations，对所有 PassGates 因子计算与滚动测试预测序列的相关性——所有模型均可获取 all_factor_correlations，不再局限于最优模型。',
+      '后端：_export_submit_ready_model_factor 返回值增加 IC/IR/Score/tvr/PassGates 官方指标；run_model_lab 将其写入最优模型的 submit_* 字段。',
+      '前端：整体因子输出 Cell 4 改为展示所有模型（非最优也可点击查看相关性）；Modal 优先展示官方指标，滚动均值指标用×100 口径。',
+    ],
+  },
   {
     timestamp: '2026-04-24T20:00:00+08:00',
     title: 'Fix IC 分布 x 轴精度问题',

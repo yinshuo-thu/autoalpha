@@ -539,9 +539,12 @@ def _evaluate_predictions(pred: pd.Series, resp: pd.Series, *, fee_bps: float = 
             "rows": 0,
             "daily_ic_mean": 0.0,
             "daily_rank_ic_mean": 0.0,
+            "daily_ic_ir": 0.0,
+            "daily_rank_ic_ir": 0.0,
             "overall_ic": 0.0,
             "strategy": strategy,
             "daily_ic_curve": [],
+            "daily_rank_ic_curve": [],
             "prediction_comparison_curve": [],
         }
 
@@ -549,18 +552,293 @@ def _evaluate_predictions(pred: pd.Series, resp: pd.Series, *, fee_bps: float = 
     daily_rank_ic = frame.groupby(level="date").apply(_daily_corr, rank=True)
     overall_ic = frame["pred"].corr(frame["resp"])
     strategy = _strategy_from_predictions(pred, resp, fee_bps=fee_bps)
+
+    def _ic_ir(series: pd.Series) -> float:
+        vals = series.dropna()
+        if len(vals) < 2:
+            return 0.0
+        std = float(vals.std())
+        return float(vals.mean() / std) if std > 0 else 0.0
+
     return {
         "rows": int(len(frame)),
         "daily_ic_mean": float(daily_ic.dropna().mean()) if daily_ic.notna().any() else 0.0,
         "daily_rank_ic_mean": float(daily_rank_ic.dropna().mean()) if daily_rank_ic.notna().any() else 0.0,
+        "daily_ic_ir": _ic_ir(daily_ic),
+        "daily_rank_ic_ir": _ic_ir(daily_rank_ic),
         "overall_ic": float(overall_ic) if pd.notna(overall_ic) else 0.0,
         "strategy": strategy,
         "daily_ic_curve": [
             {"date": str(idx), "value": float(val)}
             for idx, val in daily_ic.dropna().items()
         ],
+        "daily_rank_ic_curve": [
+            {"date": str(idx), "value": float(val)}
+            for idx, val in daily_rank_ic.dropna().items()
+        ],
         "prediction_comparison_curve": _prediction_comparison_curve(pred, resp),
     }
+
+
+def _compute_model_input_correlations(
+    pred: pd.Series,
+    features: pd.DataFrame,
+    feature_refs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if pred.empty or features.empty:
+        return []
+
+    feature_meta = {
+        str(ref.get("run_id", "")): ref
+        for ref in feature_refs
+        if ref.get("run_id")
+    }
+    aligned = pd.concat(
+        [pred.rename("pred").astype("float32"), features.astype("float32")],
+        axis=1,
+        join="inner",
+    ).replace([np.inf, -np.inf], np.nan)
+    if aligned.empty:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for run_id, meta in feature_meta.items():
+        if run_id not in aligned.columns:
+            continue
+        valid = aligned[["pred", run_id]].dropna()
+        if len(valid) < 200:
+            continue
+        corr = valid["pred"].corr(valid[run_id])
+        if pd.isna(corr):
+            continue
+        rows.append(
+            {
+                "run_id": run_id,
+                "corr": _safe_float(corr),
+                "abs_corr": abs(_safe_float(corr)),
+                "score": _safe_float(meta.get("score", 0)),
+                "ic": _safe_float(meta.get("ic", 0)),
+                "generation": int(meta.get("generation", 0) or 0),
+                "formula": str(meta.get("formula", "") or ""),
+            }
+        )
+
+    rows.sort(key=lambda item: (item["abs_corr"], item["score"], item["run_id"]), reverse=True)
+    return rows
+
+
+def _compute_pred_series_all_factor_correlations(
+    pred: pd.Series,
+    feature_refs: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Correlate rolling-test pred series against all PassGates factors from KB."""
+    if pred.empty:
+        return []
+    selected_ids = {str(ref.get("run_id", "")) for ref in feature_refs}
+    all_factors = [
+        item for item in kb.get_all_factors()
+        if item.get("run_id") and item.get("PassGates")
+    ]
+    if not all_factors:
+        return []
+
+    pred_clean = pred.rename("pred").astype("float32").replace([np.inf, -np.inf], np.nan)
+
+    rows: List[Dict[str, Any]] = []
+    for factor in all_factors:
+        run_id = str(factor.get("run_id", ""))
+        # Prefer daily cache; fall back to full parquet.
+        cache_path = _daily_feature_cache_path(run_id)
+        if cache_path.is_file():
+            factor_df = pd.read_parquet(str(cache_path), columns=["date", "security_id", "value"])
+            if factor_df.empty:
+                continue
+            factor_series = (
+                factor_df.set_index(["date", "security_id"])["value"]
+                .astype("float32").rename(run_id).sort_index()
+            )
+        else:
+            factor_path = Path(str(factor.get("parquet_path") or ""))
+            if not factor_path.is_file():
+                continue
+            factor_df = pd.read_parquet(str(factor_path), columns=["date", "security_id", "alpha"])
+            if factor_df.empty:
+                continue
+            factor_series = (
+                factor_df.groupby(["date", "security_id"], sort=True)["alpha"]
+                .mean().astype("float32").rename(run_id).sort_index()
+            )
+
+        aligned = pd.concat([pred_clean, factor_series], axis=1, join="inner").dropna()
+        if len(aligned) < 200:
+            continue
+        corr = aligned["pred"].corr(aligned[run_id])
+        if pd.isna(corr):
+            continue
+        rows.append({
+            "run_id": run_id,
+            "corr": _safe_float(corr),
+            "abs_corr": abs(_safe_float(corr)),
+            "score": _safe_float(factor.get("Score", 0)),
+            "ic": _safe_float(factor.get("IC", 0)),
+            "generation": int(factor.get("generation", 0) or 0),
+            "formula": str(factor.get("formula", "") or ""),
+            "is_input_factor": run_id in selected_ids,
+        })
+
+    rows.sort(key=lambda item: (item["abs_corr"], item["score"], item["run_id"]), reverse=True)
+    return rows
+
+
+def _compute_submit_factor_input_correlations(
+    summary: Dict[str, Any],
+    *,
+    model_name: str,
+) -> List[Dict[str, Any]]:
+    submit_path = (
+        (summary.get("ensemble_outputs") or {}).get(model_name)
+        or ((summary.get("submit_factor_output") or {}).get("submit_path") if model_name == summary.get("best_model") else "")
+    )
+    if not submit_path or not Path(str(submit_path)).is_file():
+        return []
+
+    factor_meta = {
+        str(item.get("run_id", "")): item
+        for item in summary.get("selected_factors", [])
+        if item.get("run_id")
+    }
+    if not factor_meta:
+        return []
+
+    factor_by_id = {
+        str(item.get("run_id", "")): item
+        for item in kb.get_all_factors()
+        if item.get("run_id")
+    }
+
+    model_df = pd.read_parquet(str(submit_path), columns=["date", "security_id", "alpha"])
+    if model_df.empty:
+        return []
+    model_series = (
+        model_df.groupby(["date", "security_id"], sort=True)["alpha"]
+        .mean()
+        .astype("float32")
+        .rename("pred")
+        .sort_index()
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for run_id, meta in factor_meta.items():
+        factor = factor_by_id.get(run_id)
+        factor_path = Path(str((factor or {}).get("parquet_path") or ""))
+        if not factor_path.is_file():
+            continue
+        factor_df = pd.read_parquet(str(factor_path), columns=["date", "security_id", "alpha"])
+        if factor_df.empty:
+            continue
+        factor_series = (
+            factor_df.groupby(["date", "security_id"], sort=True)["alpha"]
+            .mean()
+            .astype("float32")
+            .rename(run_id)
+            .sort_index()
+        )
+        aligned = pd.concat([model_series, factor_series], axis=1, join="inner").dropna()
+        if len(aligned) < 200:
+            continue
+        corr = aligned["pred"].corr(aligned[run_id])
+        if pd.isna(corr):
+            continue
+        rows.append(
+            {
+                "run_id": run_id,
+                "corr": _safe_float(corr),
+                "abs_corr": abs(_safe_float(corr)),
+                "score": _safe_float(meta.get("score", 0)),
+                "ic": _safe_float(meta.get("ic", 0)),
+                "generation": int(meta.get("generation", 0) or 0),
+                "formula": str(meta.get("formula", "") or ""),
+            }
+        )
+
+    rows.sort(key=lambda item: (item["abs_corr"], item["score"], item["run_id"]), reverse=True)
+    return rows
+
+
+def _compute_submit_factor_all_correlations(
+    summary: Dict[str, Any],
+    *,
+    model_name: str,
+) -> List[Dict[str, Any]]:
+    submit_path = (
+        (summary.get("ensemble_outputs") or {}).get(model_name)
+        or ((summary.get("submit_factor_output") or {}).get("submit_path") if model_name == summary.get("best_model") else "")
+    )
+    if not submit_path or not Path(str(submit_path)).is_file():
+        return []
+
+    all_factors = [
+        item
+        for item in kb.get_all_factors()
+        if item.get("run_id") and item.get("PassGates")
+    ]
+    if not all_factors:
+        return []
+
+    selected_factor_ids = {
+        str(item.get("run_id", ""))
+        for item in summary.get("selected_factors", [])
+        if item.get("run_id")
+    }
+
+    model_df = pd.read_parquet(str(submit_path), columns=["date", "security_id", "alpha"])
+    if model_df.empty:
+        return []
+    model_series = (
+        model_df.groupby(["date", "security_id"], sort=True)["alpha"]
+        .mean()
+        .astype("float32")
+        .rename("pred")
+        .sort_index()
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for factor in all_factors:
+        run_id = str(factor.get("run_id", ""))
+        factor_path = Path(str(factor.get("parquet_path") or ""))
+        if not run_id or not factor_path.is_file():
+            continue
+        factor_df = pd.read_parquet(str(factor_path), columns=["date", "security_id", "alpha"])
+        if factor_df.empty:
+            continue
+        factor_series = (
+            factor_df.groupby(["date", "security_id"], sort=True)["alpha"]
+            .mean()
+            .astype("float32")
+            .rename(run_id)
+            .sort_index()
+        )
+        aligned = pd.concat([model_series, factor_series], axis=1, join="inner").dropna()
+        if len(aligned) < 200:
+            continue
+        corr = aligned["pred"].corr(aligned[run_id])
+        if pd.isna(corr):
+            continue
+        rows.append(
+            {
+                "run_id": run_id,
+                "corr": _safe_float(corr),
+                "abs_corr": abs(_safe_float(corr)),
+                "score": _safe_float(factor.get("Score", 0)),
+                "ic": _safe_float(factor.get("IC", 0)),
+                "generation": int(factor.get("generation", 0) or 0),
+                "formula": str(factor.get("formula", "") or ""),
+                "is_input_factor": run_id in selected_factor_ids,
+            }
+        )
+
+    rows.sort(key=lambda item: (item["abs_corr"], item["score"], item["run_id"]), reverse=True)
+    return rows
 
 
 def _serialize_curve(curve: pd.Series) -> List[Dict[str, Any]]:
@@ -1099,6 +1377,14 @@ def _export_submit_ready_model_factor(
         "sanity_report": sanity_report,
         "top_features": importance_items[:20],
         "created_at": metadata["exported_at"],
+        # Official submission-like metrics (same scale as factor evaluation)
+        "IC": snapshot["IC"],
+        "IR": snapshot["IR"],
+        "Score": snapshot["Score"],
+        "tvr": snapshot["tvr"],
+        "TurnoverLocal": snapshot["TurnoverLocal"],
+        "PassGates": snapshot["PassGates"],
+        "GatesDetail": snapshot["GatesDetail"],
     }
     (run_dir / f"{model_name.lower()}_submit_factor.json").write_text(
         json.dumps(run_dir_payload, ensure_ascii=False, indent=2),
@@ -1319,6 +1605,8 @@ def run_model_lab(
     _log(f"Constructed {len(windows)} rolling windows", log_path)
 
     model_window_metrics: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    model_prediction_series: Dict[str, List[pd.Series]] = defaultdict(list)
+    model_input_feature_frames: Dict[str, List[pd.DataFrame]] = defaultdict(list)
     model_daily_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
     model_daily_gross_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
     model_daily_fees: Dict[str, List[pd.Series]] = defaultdict(list)
@@ -1363,9 +1651,15 @@ def run_model_lab(
         for model_name, model_output in fitted_models.items():
             pred = pd.Series(model_output["pred"], index=X_test.index, name="pred").astype("float32")
             evaluation = _evaluate_predictions(pred, y_test, fee_bps=fee_bps)
+            model_prediction_series[model_name].append(pred)
+            model_input_feature_frames[model_name].append(
+                frame.loc[test_mask, feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
+            )
             payload = {
                 "daily_ic_mean": evaluation["daily_ic_mean"],
                 "daily_rank_ic_mean": evaluation["daily_rank_ic_mean"],
+                "daily_ic_ir": evaluation["daily_ic_ir"],
+                "daily_rank_ic_ir": evaluation["daily_rank_ic_ir"],
                 "overall_ic": evaluation["overall_ic"],
                 "rows": evaluation["rows"],
                 "pnl": evaluation["strategy"]["total_pnl"],
@@ -1428,6 +1722,7 @@ def run_model_lab(
         drawdown = cumulative - cumulative.cummax()
         avg_ic = float(np.mean([item["daily_ic_mean"] for item in metrics_list]))
         avg_rank_ic = float(np.mean([item["daily_rank_ic_mean"] for item in metrics_list]))
+        avg_ir = float(np.mean([item.get("daily_rank_ic_ir", 0.0) for item in metrics_list]))
         avg_sharpe = float(np.mean([item["sharpe"] for item in metrics_list]))
         total_pnl = float(cumulative.iloc[-1]) if len(cumulative) else 0.0
         gross_pnl = float(gross_cumulative.iloc[-1]) if len(gross_cumulative) else 0.0
@@ -1452,10 +1747,23 @@ def run_model_lab(
             if scores
         ]
         importance_items.sort(key=lambda item: item["importance"], reverse=True)
+        concat_pred = pd.concat(model_prediction_series[model_name]).sort_index()
+        input_factor_correlations = _compute_model_input_correlations(
+            concat_pred,
+            pd.concat(model_input_feature_frames[model_name]).sort_index(),
+            feature_refs,
+        )
+        all_factor_correlations = _compute_pred_series_all_factor_correlations(
+            concat_pred,
+            feature_refs,
+        )
 
         model_summaries[model_name] = {
             "avg_daily_ic": avg_ic,
             "avg_daily_rank_ic": avg_rank_ic,
+            "avg_daily_ic_bps": round(avg_ic * 100, 4),
+            "avg_daily_rank_ic_bps": round(avg_rank_ic * 100, 4),
+            "avg_ir": avg_ir,
             "avg_sharpe": avg_sharpe,
             "total_pnl": total_pnl,
             "gross_pnl": gross_pnl,
@@ -1471,6 +1779,8 @@ def run_model_lab(
             "daily_pnl_curve": _serialize_curve(concatenated),
             "prediction_comparison_curve": prediction_comparison_curve,
             "top_features": importance_items[:20],
+            "input_factor_correlations": input_factor_correlations,
+            "all_factor_correlations": all_factor_correlations,
         }
 
         score = avg_ic * 1000 + total_pnl
@@ -1503,6 +1813,11 @@ def run_model_lab(
             hub=hub,
         )
         ensemble_outputs[best_model] = submit_factor_output["submit_path"]
+        # Attach official submission-like metrics to the best model's summary.
+        if best_model in model_summaries:
+            for _k in ("IC", "IR", "Score", "tvr", "TurnoverLocal", "PassGates", "GatesDetail"):
+                if _k in submit_factor_output:
+                    model_summaries[best_model][f"submit_{_k}"] = submit_factor_output[_k]
 
     summary = {
         "run_id": run_id,
@@ -1529,7 +1844,25 @@ def run_model_lab(
         "models": model_summaries,
         "ensemble_outputs": ensemble_outputs,
         "submit_factor_output": submit_factor_output,
+        "best_model_input_factor_correlations": (
+            model_summaries.get(best_model, {}).get("input_factor_correlations", [])
+            if best_model
+            else []
+        ),
+        "best_model_all_factor_correlations": (
+            model_summaries.get(best_model, {}).get("all_factor_correlations", [])
+            if best_model
+            else []
+        ),
     }
+
+    if best_model and best_model in model_summaries and ensemble_outputs.get(best_model):
+        all_factor_correlations = _compute_submit_factor_all_correlations(
+            summary,
+            model_name=best_model,
+        )
+        model_summaries[best_model]["all_factor_correlations"] = all_factor_correlations
+        summary["best_model_all_factor_correlations"] = all_factor_correlations
 
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -1575,6 +1908,19 @@ def export_submit_ready_model_factor(
     summary.setdefault("ensemble_outputs", {})
     summary["ensemble_outputs"][target_model] = payload["submit_path"]
     summary["submit_factor_output"] = payload
+    summary.setdefault("models", {})
+    if target_model in summary["models"]:
+        summary["models"][target_model]["input_factor_correlations"] = _compute_submit_factor_input_correlations(
+            summary,
+            model_name=target_model,
+        )
+        summary["models"][target_model]["all_factor_correlations"] = _compute_submit_factor_all_correlations(
+            summary,
+            model_name=target_model,
+        )
+    if summary.get("best_model") == target_model:
+        summary["best_model_input_factor_correlations"] = summary["models"].get(target_model, {}).get("input_factor_correlations", [])
+        summary["best_model_all_factor_correlations"] = summary["models"].get(target_model, {}).get("all_factor_correlations", [])
     summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     (MODEL_LAB_ROOT / "latest_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),

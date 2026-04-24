@@ -136,6 +136,9 @@ interface ModelLabPoint {
 interface ModelLabModelSummary {
   avg_daily_ic: number;
   avg_daily_rank_ic: number;
+  avg_daily_ic_bps?: number;       // avg_daily_ic * 100 — same scale as factor IC
+  avg_daily_rank_ic_bps?: number;  // avg_daily_rank_ic * 100
+  avg_ir?: number;                  // IR from daily rank-IC series
   avg_sharpe: number;
   total_pnl: number;
   gross_pnl?: number;
@@ -143,6 +146,14 @@ interface ModelLabModelSummary {
   max_drawdown: number;
   hit_ratio: number;
   avg_turnover?: number;
+  // Official submission-like metrics (only on best model after submit export)
+  submit_IC?: number;
+  submit_IR?: number;
+  submit_Score?: number;
+  submit_tvr?: number;
+  submit_TurnoverLocal?: number;
+  submit_PassGates?: boolean;
+  submit_GatesDetail?: Record<string, boolean>;
   cumulative_curve: ModelLabPoint[];
   drawdown_curve?: ModelLabPoint[];
   gross_cumulative_curve?: ModelLabPoint[];
@@ -1113,20 +1124,38 @@ const EnsembleModal = ({
           </div>
         </div>
 
-        <div className="mb-4 rounded-2xl bg-slate-50 p-3">
-          <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">输出文件路径</div>
-          <div className="break-all font-mono text-[11px] leading-6 text-slate-700">{path || '--'}</div>
-          <div className="mt-1 text-[10px] text-muted-foreground">仅最佳模型产出 pq 文件；可按 submission 格式提交。</div>
-        </div>
+        {path ? (
+          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">输出文件路径</div>
+            <div className="break-all font-mono text-[11px] leading-6 text-slate-700">{path}</div>
+          </div>
+        ) : null}
 
         {modelPayload ? (
           <div className="mb-4 rounded-2xl bg-slate-50 p-3">
-            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">模型表现（滚动均值）</div>
-            <div className="grid grid-cols-3 gap-y-2 text-[11px] text-slate-600">
-              <div>IC {formatNumber(modelPayload.avg_daily_ic, 4)}</div>
-              <div>RankIC {formatNumber(modelPayload.avg_daily_rank_ic, 4)}</div>
+            {modelPayload.submit_IC !== undefined ? (
+              <>
+                <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">官方评测指标（submission-like）</div>
+                <div className="grid grid-cols-2 gap-y-2 text-[11px]">
+                  <div className="font-semibold text-emerald-700">IC {formatNumber(modelPayload.submit_IC, 2)}</div>
+                  <div className="font-semibold text-emerald-700">Score {formatNumber(modelPayload.submit_Score!, 2)}</div>
+                  <div className="font-semibold text-emerald-700">IR {formatNumber(modelPayload.submit_IR!, 2)}</div>
+                  <div className="font-semibold text-emerald-700">TVR {formatNumber(modelPayload.submit_tvr!, 1)}</div>
+                  <div className="text-slate-600">TVR本地 {formatNumber(modelPayload.submit_TurnoverLocal ?? 0, 1)}</div>
+                  <div className={modelPayload.submit_PassGates ? 'text-emerald-700' : 'text-red-600'}>
+                    {modelPayload.submit_PassGates ? '✓ PassGates' : '✗ 未过门槛'}
+                  </div>
+                </div>
+                <div className="mt-3 border-t border-slate-200 pt-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">滚动测试估算值</div>
+              </>
+            ) : (
+              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">模型表现（滚动均值 · IC 已×100对齐因子口径）</div>
+            )}
+            <div className="mt-1.5 grid grid-cols-3 gap-y-2 text-[11px] text-slate-600">
+              <div>IC {formatNumber((modelPayload.avg_daily_rank_ic_bps ?? modelPayload.avg_daily_rank_ic * 100), 2)}</div>
+              <div>IR {formatNumber(modelPayload.avg_ir ?? 0, 2)}</div>
               <div>Sharpe {formatNumber(modelPayload.avg_sharpe, 2)}</div>
-              <div>TVR {formatNumber(modelPayload.avg_turnover ?? 0, 3)}</div>
+              <div>TVR策略 {formatNumber(modelPayload.avg_turnover ?? 0, 3)}</div>
               <div>MaxDD {formatNumber(modelPayload.max_drawdown, 3)}</div>
               <div>Hit {formatPercent(modelPayload.hit_ratio * 100)}</div>
             </div>
@@ -2311,18 +2340,38 @@ export const AutoAlphaPage: React.FC = () => {
                 特征重要性 / 预测摘要
               </div>
               <div className="space-y-4">
-                {Object.entries(latestModelLab?.models || {}).map(([modelName, payload]) => (
+                {Object.entries(latestModelLab?.models || {}).map(([modelName, payload]) => {
+                  const isBestModel = modelName === latestModelLab?.best_model;
+                  const icBps = payload.avg_daily_rank_ic_bps ?? payload.avg_daily_rank_ic * 100;
+                  const irVal = payload.avg_ir ?? 0;
+                  const hasOfficial = payload.submit_IC !== undefined;
+                  return (
                   <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
                     <div className="flex min-w-0 items-center justify-between gap-3">
-                      <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
+                        {isBestModel && <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>}
+                      </div>
                       <div className="shrink-0 text-xs text-muted-foreground">Net PnL {formatNumber(payload.total_pnl, 3)}</div>
                     </div>
                     <div className="mt-2 grid gap-2 text-[11px] text-slate-600 sm:grid-cols-2 2xl:grid-cols-4">
-                      <div>IC {formatNumber(payload.avg_daily_ic, 4)}</div>
-                      <div>RankIC {formatNumber(payload.avg_daily_rank_ic, 4)}</div>
+                      <div>IC {formatNumber(icBps, 2)}</div>
+                      <div>RankIC {formatNumber(icBps, 2)}</div>
+                      <div>IR {formatNumber(irVal, 2)}</div>
                       <div>Sharpe {formatNumber(payload.avg_sharpe, 2)}</div>
-                      <div>TVR {formatNumber(payload.avg_turnover ?? 0, 3)}</div>
-                      <div>Fee {formatNumber(payload.total_fee ?? 0, 4)}</div>
+                      {hasOfficial ? (
+                        <>
+                          <div className="text-emerald-700">IC官方 {formatNumber(payload.submit_IC!, 2)}</div>
+                          <div className="text-emerald-700">IR官方 {formatNumber(payload.submit_IR!, 2)}</div>
+                          <div className="text-emerald-700">Score {formatNumber(payload.submit_Score!, 2)}</div>
+                          <div className="text-emerald-700">TVR {formatNumber(payload.submit_tvr!, 1)}</div>
+                        </>
+                      ) : (
+                        <>
+                          <div>TVR策略 {formatNumber(payload.avg_turnover ?? 0, 3)}</div>
+                          <div>Fee {formatNumber(payload.total_fee ?? 0, 4)}</div>
+                        </>
+                      )}
                       <div>Hit {formatPercent(payload.hit_ratio * 100)}</div>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
@@ -2333,7 +2382,8 @@ export const AutoAlphaPage: React.FC = () => {
                       ))}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {!(latestModelLab?.models && Object.keys(latestModelLab.models).length) ? (
                   <div className="text-sm text-muted-foreground">当前还没有模型实验结果；现在只要有 1 个有效因子，也可以产出模型实验和整体因子输出。</div>
                 ) : null}
@@ -2368,26 +2418,49 @@ export const AutoAlphaPage: React.FC = () => {
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
               <div className="mb-1 text-sm font-medium text-foreground">整体因子输出</div>
               <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                Rolling Model Lab 每次只保留最佳模型的合成 pq 文件，可直接按提交格式使用。点击卡片可查看详情、因子相关性并填入回测结果。
+                最佳模型产出 pq 文件；所有模型均可点击查看相关性分布和详细指标。
               </div>
-              {latestModelLab?.ensemble_outputs && Object.keys(latestModelLab.ensemble_outputs).length ? (
+              {latestModelLab?.models && Object.keys(latestModelLab.models).length ? (
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {Object.entries(latestModelLab.ensemble_outputs).map(([mName, path]) => (
-                    <button
-                      key={mName}
-                      onClick={() => setEnsembleModalModel(mName)}
-                      className="rounded-2xl bg-slate-50 p-3 text-left transition-colors hover:bg-slate-100"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{mName}</div>
-                        {mName === latestModelLab?.best_model && (
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>
+                  {Object.entries(latestModelLab.models).map(([mName, mPayload]) => {
+                    const pqPath = latestModelLab.ensemble_outputs?.[mName] || '';
+                    const isBest = mName === latestModelLab?.best_model;
+                    const icBps = mPayload.avg_daily_rank_ic_bps ?? mPayload.avg_daily_rank_ic * 100;
+                    const hasOfficial = mPayload.submit_IC !== undefined;
+                    return (
+                      <button
+                        key={mName}
+                        onClick={() => setEnsembleModalModel(mName)}
+                        className="rounded-2xl bg-slate-50 p-3 text-left transition-colors hover:bg-slate-100"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{mName}</div>
+                          {isBest && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>}
+                        </div>
+                        {pqPath ? (
+                          <div className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-700">{pqPath.split('/').pop()}</div>
+                        ) : (
+                          <div className="mt-2 text-[11px] text-muted-foreground">无导出文件（非最优模型）</div>
                         )}
-                      </div>
-                      <div className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-700">{String(path).split('/').pop()}</div>
-                      <div className="mt-1 text-[10px] text-muted-foreground">点击查看详情 →</div>
-                    </button>
-                  ))}
+                        <div className="mt-1.5 grid grid-cols-2 gap-x-3 text-[10px] text-slate-600">
+                          {hasOfficial ? (
+                            <>
+                              <span className="text-emerald-700">IC {formatNumber(mPayload.submit_IC!, 2)}</span>
+                              <span className="text-emerald-700">Score {formatNumber(mPayload.submit_Score!, 2)}</span>
+                              <span className="text-emerald-700">IR {formatNumber(mPayload.submit_IR!, 2)}</span>
+                              <span className="text-emerald-700">TVR {formatNumber(mPayload.submit_tvr!, 1)}</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>IC {formatNumber(icBps, 2)}</span>
+                              <span>IR {formatNumber(mPayload.avg_ir ?? 0, 2)}</span>
+                            </>
+                          )}
+                        </div>
+                        <div className="mt-1 text-[10px] text-muted-foreground">点击查看相关性 →</div>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="text-sm text-muted-foreground">整体因子输出将在首次 Model Lab 运行后出现（每积累 10 个有效因子触发一次）。</div>
