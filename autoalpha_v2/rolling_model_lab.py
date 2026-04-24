@@ -1864,6 +1864,11 @@ def run_model_lab(
         model_summaries[best_model]["all_factor_correlations"] = all_factor_correlations
         summary["best_model_all_factor_correlations"] = all_factor_correlations
 
+        pq_input_corrs = _compute_submit_factor_input_correlations(summary, model_name=best_model)
+        if pq_input_corrs:
+            model_summaries[best_model]["input_factor_correlations"] = pq_input_corrs
+            summary["best_model_input_factor_correlations"] = pq_input_corrs
+
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",

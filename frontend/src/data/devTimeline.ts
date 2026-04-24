@@ -9,6 +9,17 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-24T23:30:00+08:00',
+    title: 'Model Lab 整体因子输出卡片精简 + 相关性图直接可见',
+    summary: '简化 Cell 4 只展示唯一 pq 文件（最佳模型），IC/IR/Score 使用 evaluate_submission_like 口径；pq 输出 vs 入模因子相关性图直接显示在卡片内（无需打开 Modal）；后端在 pq 导出后从实际 pq 文件重算输入因子相关性；EnsembleModal 因子贡献权重加小字说明。',
+    tags: ['Model Lab', 'Frontend', 'Backend', 'UX'],
+    bullets: [
+      '后端：run_model_lab 在 pq 导出后调用 _compute_submit_factor_input_correlations，将 pq vs 入模因子相关性写入 best_model.input_factor_correlations（从实际 pq 文件计算，非滚动预测）。',
+      '前端 Cell 4：简化为只展示最佳模型；官方 IC/IR/Score/TVR/PassGates 突出显示；直接内嵌 pq vs 入模因子相关性迷你条形图，蓝色=正相关 橙色=负相关。',
+      '前端 EnsembleModal 因子贡献权重：标题下增加一行小字，解释数值含义（LightGBM 特征增益 / 线性模型系数绝对值）。',
+    ],
+  },
+  {
     timestamp: '2026-04-24T22:30:00+08:00',
     title: '修复因子相关性时序图不全 & 热图乱序问题',
     summary: '彻底修复两个长期 bug：时序图因 validRunIds 二次过滤导致部分通过因子丢失；热图行列顺序依赖后端缓存顺序而非生成时序。后端同时修复 heatmap_stale 被 trend_stale 短路跳过的逻辑 bug。',

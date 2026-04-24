@@ -1164,7 +1164,8 @@ const EnsembleModal = ({
 
         {modelPayload?.top_features?.length ? (
           <div className="mb-4 rounded-2xl bg-slate-50 p-3">
-            <div className="mb-3 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">因子贡献权重</div>
+            <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">因子贡献权重</div>
+            <div className="mb-3 text-[10px] leading-5 text-slate-400">各入模因子的平均特征重要性（LightGBM: 特征增益；线性模型: 系数绝对值）。数值越大说明模型对该因子依赖越强，已按首位归一化。</div>
             <div className="space-y-2.5">
               {modelPayload.top_features.slice(0, 8).map((item) => {
                 const maxImp = modelPayload.top_features[0]?.importance || 1;
@@ -2418,50 +2419,83 @@ export const AutoAlphaPage: React.FC = () => {
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
               <div className="mb-1 text-sm font-medium text-foreground">整体因子输出</div>
               <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                最佳模型产出 pq 文件；所有模型均可点击查看相关性分布和详细指标。
+                最佳模型产出唯一 pq 文件，IC / IR / Score 按提交口径（evaluate_submission_like）计算。
               </div>
-              {latestModelLab?.models && Object.keys(latestModelLab.models).length ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {Object.entries(latestModelLab.models).map(([mName, mPayload]) => {
-                    const pqPath = latestModelLab.ensemble_outputs?.[mName] || '';
-                    const isBest = mName === latestModelLab?.best_model;
-                    const icBps = mPayload.avg_daily_rank_ic_bps ?? mPayload.avg_daily_rank_ic * 100;
-                    const hasOfficial = mPayload.submit_IC !== undefined;
-                    return (
+              {latestModelLab?.best_model && latestModelLab.models?.[latestModelLab.best_model] ? (
+                (() => {
+                  const bestName = latestModelLab.best_model!;
+                  const bestPayload = latestModelLab.models![bestName];
+                  const pqPath = latestModelLab.ensemble_outputs?.[bestName] || '';
+                  const hasOfficial = bestPayload.submit_IC !== undefined;
+                  const inputCorrs = (
+                    bestPayload.input_factor_correlations
+                    || latestModelLab.best_model_input_factor_correlations
+                    || []
+                  ).slice(0, 10);
+                  return (
+                    <div className="space-y-3">
                       <button
-                        key={mName}
-                        onClick={() => setEnsembleModalModel(mName)}
-                        className="rounded-2xl bg-slate-50 p-3 text-left transition-colors hover:bg-slate-100"
+                        onClick={() => setEnsembleModalModel(bestName)}
+                        className="w-full rounded-2xl bg-slate-50 p-3 text-left transition-colors hover:bg-slate-100"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{mName}</div>
-                          {isBest && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>}
+                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{bestName}</div>
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>
                         </div>
                         {pqPath ? (
-                          <div className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-700">{pqPath.split('/').pop()}</div>
+                          <div className="mt-1.5 break-all font-mono text-[11px] leading-5 text-slate-600">{pqPath.split('/').pop()}</div>
+                        ) : null}
+                        {hasOfficial ? (
+                          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                            <span className="font-semibold text-emerald-700">IC {formatNumber(bestPayload.submit_IC!, 2)}</span>
+                            <span className="font-semibold text-emerald-700">Score {formatNumber(bestPayload.submit_Score!, 2)}</span>
+                            <span className="font-semibold text-emerald-700">IR {formatNumber(bestPayload.submit_IR!, 2)}</span>
+                            <span className="font-semibold text-emerald-700">TVR {formatNumber(bestPayload.submit_tvr!, 1)}</span>
+                            <span className={`col-span-2 text-[10px] ${bestPayload.submit_PassGates ? 'text-emerald-700' : 'text-red-600'}`}>
+                              {bestPayload.submit_PassGates ? '✓ PassGates' : '✗ 未过门槛'}
+                            </span>
+                          </div>
                         ) : (
-                          <div className="mt-2 text-[11px] text-muted-foreground">无导出文件（非最优模型）</div>
+                          <div className="mt-1.5 grid grid-cols-2 gap-x-4 text-[11px] text-slate-600">
+                            <span>IC {formatNumber(bestPayload.avg_daily_rank_ic_bps ?? bestPayload.avg_daily_rank_ic * 100, 2)}</span>
+                            <span>IR {formatNumber(bestPayload.avg_ir ?? 0, 2)}</span>
+                          </div>
                         )}
-                        <div className="mt-1.5 grid grid-cols-2 gap-x-3 text-[10px] text-slate-600">
-                          {hasOfficial ? (
-                            <>
-                              <span className="text-emerald-700">IC {formatNumber(mPayload.submit_IC!, 2)}</span>
-                              <span className="text-emerald-700">Score {formatNumber(mPayload.submit_Score!, 2)}</span>
-                              <span className="text-emerald-700">IR {formatNumber(mPayload.submit_IR!, 2)}</span>
-                              <span className="text-emerald-700">TVR {formatNumber(mPayload.submit_tvr!, 1)}</span>
-                            </>
-                          ) : (
-                            <>
-                              <span>IC {formatNumber(icBps, 2)}</span>
-                              <span>IR {formatNumber(mPayload.avg_ir ?? 0, 2)}</span>
-                            </>
-                          )}
-                        </div>
-                        <div className="mt-1 text-[10px] text-muted-foreground">点击查看相关性 →</div>
+                        <div className="mt-2 text-[10px] text-muted-foreground">点击查看完整相关性分析 →</div>
                       </button>
-                    );
-                  })}
-                </div>
+
+                      {inputCorrs.length > 0 ? (
+                        <div className="rounded-2xl bg-slate-50 p-3">
+                          <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">pq 输出 vs 入模因子相关性</div>
+                          <div className="mb-1.5 text-[10px] text-slate-400">模型输出信号与各入模因子在预测区间的线性相关系数（蓝=正向 橙=反向）</div>
+                          <div className="space-y-1.5">
+                            {inputCorrs.map((item) => {
+                              const corr = Number(item.corr || 0);
+                              const absPct = Math.min(100, Math.abs(corr) * 100);
+                              const isPos = corr >= 0;
+                              return (
+                                <div key={item.run_id} className="flex items-center gap-2 text-[10px]">
+                                  <div className="w-[72px] shrink-0 truncate font-mono text-slate-500">{item.run_id}</div>
+                                  <div className="relative flex flex-1 items-center">
+                                    <div className="h-1.5 w-full rounded-full bg-slate-200">
+                                      <div
+                                        className={`absolute top-0 h-1.5 rounded-full ${isPos ? 'left-1/2 bg-sky-400' : 'right-1/2 bg-orange-400'}`}
+                                        style={{ width: `${absPct / 2}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <span className={`w-12 shrink-0 text-right font-semibold ${isPos ? 'text-sky-600' : 'text-orange-600'}`}>
+                                    {formatNumber(corr, 3)}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })()
               ) : (
                 <div className="text-sm text-muted-foreground">整体因子输出将在首次 Model Lab 运行后出现（每积累 10 个有效因子触发一次）。</div>
               )}
