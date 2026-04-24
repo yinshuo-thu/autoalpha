@@ -6,8 +6,21 @@ export interface DevTimelineEntry {
   bullets: string[];
 }
 
-// 后续每次“修改并跑通”后，按时间顺序在这里追加一条记录即可。
+// 后续每次“修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
+  {
+    timestamp: '2026-04-24T18:20:00+08:00',
+    title: 'DEV 时间线回填 RAG 机制细节',
+    summary: '不再单独维护 RAG block，而是把当前真实运行中的 RAG 机制按时间线补回原有节点，包括 query-aware 召回、Embedding 回退、auto compact 和公式 prompt 的组装顺序。',
+    tags: ['DEV Page', 'RAG', 'Frontend'],
+    bullets: [
+      '移除 DEV 页面中的独立 RAG ROADMAP 区块，避免历史记录和规划说明割裂。',
+      '把 RAG 的实际落地内容补回 2026-04-22 各时间点：v2 包拆分、inspiration 检索、passing factor/query-aware recall、generation experience 和记忆回灌。',
+      '补清楚当前正样本召回不是静态 top-K，而是先由 Stage-1 hypothesis 产出 query_text，再做 semantic retrieval；如果 embedding 不可用，就自动回退到 lexical similarity + score anchor。',
+      '补清楚 prompt 不是一次性硬拼，而是按 passing_rag、failure summary、hypothesis、parent contrast、inspiration、negative families、generation experience 等 section 组装，再走 auto compact 控制总长度。',
+      'CODEX_CHANGELOG 也同步去掉独立 RAG 总结段，改成按时间线记录真实实现。',
+    ],
+  },
   {
     timestamp: '2026-04-09T23:30:00+08:00',
     title: '前端雏形与首轮代码审查',
@@ -83,22 +96,26 @@ export const devTimeline: DevTimelineEntry[] = [
   {
     timestamp: '2026-04-22T00:18:43+08:00',
     title: '切分为 AutoAlpha v1 / v2',
-    summary: '将原自动研究包整理成更清晰的 v1 / v2 结构，并同步接入服务端。',
+    summary: '将原自动研究包整理成更清晰的 v1 / v2 结构，并同步接入服务端；这一步也把后续 RAG 链路所需的知识库、灵感库和 prompt 生成职责拆到了清晰模块里。',
     tags: ['AutoAlpha v2', 'Refactor', 'Server'],
     bullets: [
       '提交 f16a81c，创建 clean AutoAlpha v2 package。',
       'server.py 接入新的 v2 API 路由与服务逻辑。',
       'README 调整为中英文分层说明。',
+      '在 v2 中正式拆出 knowledge_base、inspiration_db、llm_client、loop 等模块：knowledge_base 负责 passing / failed / generation memory，inspiration_db 负责外部灵感语料，llm_client 负责把这些上下文拼成可控预算的 prompt。',
     ],
   },
   {
     timestamp: '2026-04-22T01:13:19+08:00',
     title: 'v2 灵感源扩展与前端主页面成型',
-    summary: '把 inspirations、来源统计和前端主页面结构一起补齐，形成 AutoAlpha / Record / Ideas 主导航。',
+    summary: '把 inspirations、来源统计和前端主页面结构一起补齐，形成 AutoAlpha / Record / Ideas 主导航，也把“外部灵感检索层 + 知识库检索层”这两类 RAG 语料正式分开。',
     tags: ['Ideas', 'Frontend', 'Analytics'],
     bullets: [
       '扩展 inspiration_db、inspiration_fetcher、knowledge_base、llm_client、pipeline。',
       '前端强化 AutoAlphaPage、AutoAlphaRecordsPage、InspirationBrowserPage 与 layout 导航。',
+      'inspiration_db 开始承担独立的外部灵感检索层，不再只把 prompt 文本当静态素材，而是把 paper、笔记、prompt brainstorm 等来源转成可采样的 research context。',
+      'knowledge_base 持续记录公式、thought process、父代、来源、过 gate 状态和失败细节，为 passing retrieval、negative family retrieval 和 generation lesson retrieval 提供统一语料。',
+      '这时的思路已经形成分层：外层先从 inspiration 取“机制灵感”，内层再从 knowledge base 取“已验证结构、失败模式和对照样本”，共同服务最后一条公式 prompt。',
     ],
   },
   {
@@ -115,12 +132,15 @@ export const devTimeline: DevTimelineEntry[] = [
   {
     timestamp: '2026-04-22T08:37:35+08:00',
     title: 'generation experience 汇总',
-    summary: '把生成经验写入知识库并回灌到下一轮 prompt，让循环具备可积累的经验记忆。',
+    summary: '把生成经验写入知识库并回灌到下一轮 prompt，让循环具备可积累的经验记忆；当前 RAG 也从“只看 passing factor”扩展成“正样本 + 失败经验 + 历史代际总结”的混合记忆。',
     tags: ['RAG', 'Prompt', 'Experience'],
     bullets: [
-      'knowledge_base 增加 generation experience summary。',
-      'llm_client / loop 接入最近 generation 经验上下文。',
+      'knowledge_base 增加 generation experience summary：每代会沉淀 tested、passing、best_score、failure_counts 和摘要文本，形成 generation 级别的实验复盘。',
+      'llm_client / loop 接入最近 generation 经验上下文，默认把最近几代 summary 直接拼进 prompt，优先让模型感知最近的失败分布与修正方向。',
+      '额外增加 relevance match：当前 archetype / dominant failure mode 会触发一次轻量关键词检索，把较早但相关的 generation lesson 也召回进来，避免经验只停留在最近 2 到 3 轮。',
       '记录页增加生成经验和代际统计展示。',
+      '当前公式生成 prompt 的组成顺序也在这一阶段稳定下来：passing_rag -> failure_summary -> hypothesis_context -> parent contrast -> inspiration_text -> exhausted_families -> productive_pairs/crowded_tokens -> generation_experience -> mode_rules。',
+      '为了不让上下文越积越大，prompt 会在发送前跑 auto compact：先按 section 大小做本地压缩，只在必要时对少数可压缩 section 做一次便宜 LLM 压缩，最后仍超预算就继续 deterministic trim，保证关键信息优先保留。',
     ],
   },
   {
@@ -131,6 +151,7 @@ export const devTimeline: DevTimelineEntry[] = [
     bullets: [
       '按 git log、git diff、文件修改时间归纳历史改动。',
       '明确记录 AutoAlpha v2、LLM 挖掘、评估与前端/API 的持续增强方向。',
+      '把 RAG 机制按时间线拆回对应节点，而不是额外维护一份脱离上下文的说明块。',
     ],
   },
   {
@@ -178,6 +199,18 @@ export const devTimeline: DevTimelineEntry[] = [
       '验证：新 loop 运行后 WARN 消失，Model Lab 将在每 10 个测试因子后自动触发。',
       '全流程确认：30 轮新 loop Round 1 测试 2/2 过关，Round 2 也全部来自 cache，零内联 LLM。',
       '当前累计 KB: 1930 tested / 58 passing / best=209.28。',
+    ],
+  },
+  {
+    timestamp: '2026-04-24T20:30:00+08:00',
+    title: 'AutoAlpha 页 Rolling Model Lab 改为 2×2 布局并新增整体因子卡片',
+    summary: '把 Rolling Model Lab 区块的四个内容面板重新排列为 2×2 网格，并为整体因子输出新增可点击的卡片和详情弹窗（含因子相关性、贡献权重、可填回测结果）。',
+    tags: ['Frontend', 'AutoAlpha', 'ModelLab', 'Layout'],
+    bullets: [
+      '2×2 布局：左上=跨模型特征重要性共识，右上=特征重要性/预测摘要，左下=入模因子清单（限高 260px），右下=整体因子输出。',
+      '整体因子输出说明更新为实际机制：Rolling Model Lab 只保存最佳模型的 pq 文件，与 ensemble_outputs 字段一致。',
+      '新增 EnsembleModal 弹窗：可查看合成因子路径、模型表现指标、因子贡献权重 bar chart、入模因子两两相关性列表，以及可本地存储的回测结果表单。',
+      '修复编辑引入的 U+201D 弯引号问题（184 处 className 属性引号被 editor 错误替换）；去除未使用的 FileStack import。',
     ],
   },
 ];

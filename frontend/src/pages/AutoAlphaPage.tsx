@@ -17,7 +17,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { BrainCircuit, FileStack, FlaskConical, FolderSync, Sparkles, Wand2 } from 'lucide-react';
+import { BrainCircuit, FlaskConical, FolderSync, Sparkles, Wand2 } from 'lucide-react';
 
 interface KbFactor {
   run_id: string;
@@ -239,6 +239,11 @@ interface FeatureConsensusPoint {
   formula?: string;
   score?: number;
   ic?: number;
+  dominantTrack: string;
+  dominantTrackLabel: string;
+  dominantTrackSupportCount: number;
+  dominantTrackConsensus: number;
+  familyFeatureCount: number;
 }
 
 interface InspirationRecord {
@@ -298,6 +303,21 @@ interface ManualFactor {
   metadata_path?: string;
 }
 
+interface FactorCorrelationsData {
+  run_ids: string[];
+  labels: string[];
+  matrix: number[][];
+  updated_at: string;
+}
+
+interface EnsembleBacktestEntry {
+  ic: string;
+  ir: string;
+  score: string;
+  submitDate: string;
+  notes: string;
+}
+
 const COLORS = {
   used: '#f97316',
   remaining: '#10b981',
@@ -319,6 +339,9 @@ const COLORS = {
 };
 
 const MODEL_COLORS = ['#0f766e', '#2563eb', '#9333ea', '#dc2626', '#0891b2', '#ca8a04', '#4f46e5', '#16a34a'];
+const MODEL_COMPARISON_CHART_MARGIN = { top: 12, right: 32, bottom: 48, left: 8 };
+const MODEL_COMPARISON_LEFT_AXIS_WIDTH = 56;
+const MODEL_COMPARISON_RIGHT_AXIS_WIDTH = 56;
 
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -502,6 +525,35 @@ function compactFeatureLabel(value: string) {
   return value.length <= 20 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
 }
 
+const FEATURE_TRACK_LABELS: Record<string, string> = {
+  raw: '原始值',
+  csz: '截面 Z 分数',
+  rank: '截面 Rank',
+  lag1: '前 1 期',
+  diff1: '1 期变化',
+  mom2: '2 期动量',
+};
+
+function parseModelFeatureName(value: string) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return {
+      rawFeature: '',
+      baseFactor: '',
+      track: 'raw',
+      trackLabel: FEATURE_TRACK_LABELS.raw,
+    };
+  }
+  const [baseFactor, ...suffixParts] = text.split('__');
+  const track = suffixParts.join('__') || 'raw';
+  return {
+    rawFeature: text,
+    baseFactor,
+    track,
+    trackLabel: FEATURE_TRACK_LABELS[track] || track.toUpperCase(),
+  };
+}
+
 function featureConsensusColor(supportRatio: number) {
   if (supportRatio >= 0.99) return '#0f766e';
   if (supportRatio >= 0.66) return '#2563eb';
@@ -534,6 +586,17 @@ function buildFeatureConsensus(
       formula?: string;
       score?: number;
       ic?: number;
+      tracks: Map<
+        string,
+        {
+          track: string;
+          label: string;
+          consensusImportance: number;
+          totalImportance: number;
+          supportCount: number;
+          models: string[];
+        }
+      >;
     }
   >();
 
@@ -544,7 +607,8 @@ function buildFeatureConsensus(
     );
 
     (payload.top_features || []).slice(0, 8).forEach((item, index) => {
-      const factor = String(item.factor || '').trim();
+      const parsed = parseModelFeatureName(String(item.factor || ''));
+      const factor = parsed.baseFactor;
       if (!factor) return;
 
       const meta = selectedMap.get(factor);
@@ -556,10 +620,21 @@ function buildFeatureConsensus(
         consensusImportance: 0,
         totalImportance: 0,
         supportCount: 0,
-        models: [],
+        models: [] as string[],
         formula: meta?.formula,
         score: meta?.score,
         ic: meta?.ic,
+        tracks: new Map<
+          string,
+          {
+            track: string;
+            label: string;
+            consensusImportance: number;
+            totalImportance: number;
+            supportCount: number;
+            models: string[];
+          }
+        >(),
       };
 
       current.consensusImportance += weightedImportance;
@@ -574,23 +649,52 @@ function buildFeatureConsensus(
       if (current.score === undefined && meta?.score !== undefined) current.score = meta.score;
       if (current.ic === undefined && meta?.ic !== undefined) current.ic = meta.ic;
 
+      const trackCurrent = current.tracks.get(parsed.track) || {
+        track: parsed.track,
+        label: parsed.trackLabel,
+        consensusImportance: 0,
+        totalImportance: 0,
+        supportCount: 0,
+        models: [] as string[],
+      };
+      trackCurrent.consensusImportance += weightedImportance;
+      trackCurrent.totalImportance += importance;
+      if (!trackCurrent.models.includes(modelName)) {
+        trackCurrent.models.push(modelName);
+        trackCurrent.supportCount += 1;
+      }
+      current.tracks.set(parsed.track, trackCurrent);
+
       aggregated.set(factor, current);
     });
   });
 
   return Array.from(aggregated.values())
-    .map((item) => ({
-      factor: item.factor,
-      shortLabel: compactFeatureLabel(item.factor),
-      consensusImportance: Number(item.consensusImportance.toFixed(3)),
-      avgImportance: Number((item.totalImportance / Math.max(item.supportCount, 1)).toFixed(3)),
-      supportCount: item.supportCount,
-      supportRatio: item.supportCount / modelEntries.length,
-      models: item.models,
-      formula: item.formula,
-      score: item.score,
-      ic: item.ic,
-    }))
+    .map((item) => {
+      const orderedTracks = Array.from(item.tracks.values()).sort((a, b) => {
+        if (b.consensusImportance !== a.consensusImportance) return b.consensusImportance - a.consensusImportance;
+        if (b.supportCount !== a.supportCount) return b.supportCount - a.supportCount;
+        return b.totalImportance - a.totalImportance;
+      });
+      const dominantTrack = orderedTracks[0];
+      return {
+        factor: item.factor,
+        shortLabel: compactFeatureLabel(item.factor),
+        consensusImportance: Number(item.consensusImportance.toFixed(3)),
+        avgImportance: Number((item.totalImportance / Math.max(item.supportCount, 1)).toFixed(3)),
+        supportCount: item.supportCount,
+        supportRatio: item.supportCount / modelEntries.length,
+        models: item.models,
+        formula: item.formula,
+        score: item.score,
+        ic: item.ic,
+        dominantTrack: dominantTrack?.track || 'raw',
+        dominantTrackLabel: dominantTrack?.label || FEATURE_TRACK_LABELS.raw,
+        dominantTrackSupportCount: dominantTrack?.supportCount || 0,
+        dominantTrackConsensus: Number((dominantTrack?.consensusImportance || 0).toFixed(3)),
+        familyFeatureCount: orderedTracks.length,
+      };
+    })
     .sort((a, b) => {
       if (b.consensusImportance !== a.consensusImportance) return b.consensusImportance - a.consensusImportance;
       if (b.supportCount !== a.supportCount) return b.supportCount - a.supportCount;
@@ -844,12 +948,194 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
   );
 };
 
+function getSelectedFactorCorrelations(
+  selectedRunIds: string[],
+  corrData: FactorCorrelationsData,
+): Array<{ a: string; b: string; corr: number }> {
+  const pairs: Array<{ a: string; b: string; corr: number }> = [];
+  for (let i = 0; i < selectedRunIds.length; i++) {
+    const idxA = corrData.run_ids.indexOf(selectedRunIds[i]);
+    if (idxA === -1) continue;
+    for (let j = i + 1; j < selectedRunIds.length; j++) {
+      const idxB = corrData.run_ids.indexOf(selectedRunIds[j]);
+      if (idxB === -1) continue;
+      const corr = corrData.matrix[idxA]?.[idxB];
+      if (corr !== undefined && corr !== null && Number.isFinite(corr)) {
+        pairs.push({ a: selectedRunIds[i], b: selectedRunIds[j], corr });
+      }
+    }
+  }
+  return pairs.sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr));
+}
+
+const EnsembleModal = ({
+  modelName,
+  modelLab,
+  factorCorrelations,
+  onOpenFactor,
+  onClose,
+}: {
+  modelName: string;
+  modelLab: ModelLabSummary;
+  factorCorrelations: FactorCorrelationsData;
+  onOpenFactor: (runId: string) => void;
+  onClose: () => void;
+}) => {
+  const [backtest, setBacktest] = useState<EnsembleBacktestEntry>(() => {
+    try { return JSON.parse(localStorage.getItem('ensemble_backtest') || '{}')[modelName] || { ic: '', ir: '', score: '', submitDate: '', notes: '' }; }
+    catch { return { ic: '', ir: '', score: '', submitDate: '', notes: '' }; }
+  });
+  const [saved, setSaved] = useState(false);
+  const modelPayload = modelLab.models?.[modelName];
+  const path = modelLab.ensemble_outputs?.[modelName] || '';
+  const selectedRunIds = (modelLab.selected_factors || []).map((f) => f.run_id);
+  const correlationPairs = getSelectedFactorCorrelations(selectedRunIds, factorCorrelations);
+  const isBest = modelName === modelLab.best_model;
+
+  const saveBacktest = () => {
+    try {
+      const all = JSON.parse(localStorage.getItem('ensemble_backtest') || '{}');
+      all[modelName] = backtest;
+      localStorage.setItem('ensemble_backtest', JSON.stringify(all));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl border border-border/60 bg-white p-6 shadow-2xl">
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">整体合成因子</div>
+            <div className="mt-1 truncate font-semibold text-foreground">{modelName}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {isBest && <span className="rounded-full bg-emerald-100 px-3 py-1 text-[11px] font-medium text-emerald-700">BEST</span>}
+            <button onClick={onClose} className="rounded-full p-1 text-muted-foreground hover:bg-slate-100 hover:text-foreground">✕</button>
+          </div>
+        </div>
+
+        <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+          <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">输出文件路径</div>
+          <div className="break-all font-mono text-[11px] leading-6 text-slate-700">{path || '--'}</div>
+          <div className="mt-1 text-[10px] text-muted-foreground">仅最佳模型产出 pq 文件；可按 submission 格式提交。</div>
+        </div>
+
+        {modelPayload ? (
+          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">模型表现（滚动均值）</div>
+            <div className="grid grid-cols-3 gap-y-2 text-[11px] text-slate-600">
+              <div>IC {formatNumber(modelPayload.avg_daily_ic, 4)}</div>
+              <div>RankIC {formatNumber(modelPayload.avg_daily_rank_ic, 4)}</div>
+              <div>Sharpe {formatNumber(modelPayload.avg_sharpe, 2)}</div>
+              <div>TVR {formatNumber(modelPayload.avg_turnover ?? 0, 3)}</div>
+              <div>MaxDD {formatNumber(modelPayload.max_drawdown, 3)}</div>
+              <div>Hit {formatPercent(modelPayload.hit_ratio * 100)}</div>
+            </div>
+          </div>
+        ) : null}
+
+        {modelPayload?.top_features?.length ? (
+          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+            <div className="mb-3 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">因子贡献权重</div>
+            <div className="space-y-2.5">
+              {modelPayload.top_features.slice(0, 8).map((item) => {
+                const maxImp = modelPayload.top_features[0]?.importance || 1;
+                const pct = Math.min(100, (item.importance / maxImp) * 100);
+                return (
+                  <div key={item.factor}>
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <button
+                        onClick={() => { onOpenFactor(item.factor); onClose(); }}
+                        className="min-w-0 truncate text-left font-mono text-[11px] text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                      >
+                        {item.factor}
+                      </button>
+                      <span className="shrink-0 text-[11px] text-slate-600">{formatNumber(item.importance, 3)}</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                      <div className="h-1.5 rounded-full bg-sky-400 transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {correlationPairs.length > 0 ? (
+          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
+            <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">入模因子相关性（绝对值降序，前 6 对）</div>
+            <div className="space-y-1.5">
+              {correlationPairs.slice(0, 6).map(({ a, b, corr }) => (
+                <div key={`${a}-${b}`} className="flex items-center gap-2 text-[11px]">
+                  <span className="w-[40%] truncate font-mono text-slate-600">{a}</span>
+                  <span className="text-muted-foreground">↔</span>
+                  <span className="w-[40%] truncate font-mono text-slate-600">{b}</span>
+                  <span className={`ml-auto shrink-0 font-semibold ${Math.abs(corr) > 0.7 ? 'text-amber-600' : Math.abs(corr) > 0.4 ? 'text-sky-600' : 'text-emerald-600'}`}>
+                    {corr.toFixed(3)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="rounded-2xl bg-slate-50 p-3">
+          <div className="mb-3 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">填入回测结果</div>
+          <div className="mb-2 grid grid-cols-3 gap-2">
+            {(['ic', 'ir', 'score'] as const).map((field) => (
+              <div key={field}>
+                <label className="text-[10px] uppercase text-muted-foreground">{field.toUpperCase()}</label>
+                <input
+                  value={backtest[field]}
+                  onChange={(e) => setBacktest((prev) => ({ ...prev, [field]: e.target.value }))}
+                  placeholder="--"
+                  className="mt-1 w-full rounded-xl border border-border/50 bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-sky-400"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mb-2">
+            <label className="text-[10px] uppercase text-muted-foreground">提交日期</label>
+            <input
+              type="date"
+              value={backtest.submitDate}
+              onChange={(e) => setBacktest((prev) => ({ ...prev, submitDate: e.target.value }))}
+              className="mt-1 w-full rounded-xl border border-border/50 bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-sky-400"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="text-[10px] uppercase text-muted-foreground">备注</label>
+            <textarea
+              value={backtest.notes}
+              onChange={(e) => setBacktest((prev) => ({ ...prev, notes: e.target.value }))}
+              placeholder="提交平台结果、竞赛排名等..."
+              rows={2}
+              className="mt-1 w-full rounded-xl border border-border/50 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-sky-400"
+            />
+          </div>
+          <button
+            onClick={saveBacktest}
+            className={`w-full rounded-2xl py-2 text-xs font-medium text-white transition-colors ${saved ? 'bg-emerald-600' : 'bg-sky-600 hover:bg-sky-700'}`}
+          >
+            {saved ? '已保存 ✓' : '保存回测结果'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const AutoAlphaPage: React.FC = () => {
   const [status, setStatus] = useState<LoopStatus | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgePayload | null>(null);
   const [balance, setBalance] = useState<BalancePayload | null>(null);
   const [modelLab, setModelLab] = useState<ModelLabPayload | null>(null);
   const [inspirations, setInspirations] = useState<InspirationPayload | null>(null);
+  const [factorCorrelations, setFactorCorrelations] = useState<FactorCorrelationsData>({ run_ids: [], labels: [], matrix: [], updated_at: '' });
+  const [ensembleModalModel, setEnsembleModalModel] = useState<string | null>(null);
   const [rounds, setRounds] = useState(10);
   const [ideas, setIdeas] = useState(4);
   const [days, setDays] = useState(0);
@@ -867,12 +1153,13 @@ export const AutoAlphaPage: React.FC = () => {
     let mounted = true;
 
     const loadAll = async () => {
-      const [statusResult, knowledgeResult, balanceResult, modelLabResult, inspirationResult] = await Promise.allSettled([
+      const [statusResult, knowledgeResult, balanceResult, modelLabResult, inspirationResult, corrResult] = await Promise.allSettled([
         fetchJson<LoopStatus>('/api/autoalpha/loop/status'),
         fetchJson<KnowledgePayload>('/api/autoalpha/knowledge'),
         fetchJson<BalancePayload>('/api/autoalpha/balance'),
         fetchJson<ModelLabPayload>('/api/autoalpha/model-lab'),
         fetchJson<InspirationPayload>('/api/autoalpha/inspirations'),
+        fetchJson<FactorCorrelationsData>('/api/autoalpha/factor-correlations'),
       ]);
 
       if (!mounted) return;
@@ -881,6 +1168,7 @@ export const AutoAlphaPage: React.FC = () => {
       if (balanceResult.status === 'fulfilled') setBalance(balanceResult.value);
       if (modelLabResult.status === 'fulfilled') setModelLab(modelLabResult.value);
       if (inspirationResult.status === 'fulfilled') setInspirations(inspirationResult.value);
+      if (corrResult.status === 'fulfilled') setFactorCorrelations(corrResult.value);
     };
 
     loadAll();
@@ -945,7 +1233,13 @@ export const AutoAlphaPage: React.FC = () => {
   );
   const topConsensusFeature = featureConsensus[0];
   const widestSupportFeature = [...featureConsensus].sort((a, b) => b.supportCount - a.supportCount || b.consensusImportance - a.consensusImportance)[0];
+  const richestTrackFeature = [...featureConsensus].sort(
+    (a, b) => b.familyFeatureCount - a.familyFeatureCount || b.consensusImportance - a.consensusImportance
+  )[0];
   const bestModelTopFeature = bestModelPayload?.top_features?.[0];
+  const bestModelTopFeatureParsed = parseModelFeatureName(String(bestModelTopFeature?.factor || ''));
+  const bestModelTopFeatureFamily = featureConsensus.find((item) => item.factor === bestModelTopFeatureParsed.baseFactor);
+  const modelCount = Object.keys(latestModelLab?.models || {}).length;
 
   const statusData = Object.entries(knowledge?.status_breakdown ?? {}).map(([name, value]) => ({
     name,
@@ -1559,10 +1853,19 @@ export const AutoAlphaPage: React.FC = () => {
               </div>
               <div className="h-[380px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={modelComparison} margin={{ top: 12, right: 28, bottom: 48, left: 8 }}>
+                  <ComposedChart data={modelComparison} margin={MODEL_COMPARISON_CHART_MARGIN}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="model" tick={{ fill: '#64748b', fontSize: 11 }} angle={-12} textAnchor="end" height={54} interval={0} />
-                    <YAxis yAxisId="ic" tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis yAxisId="ic" width={MODEL_COMPARISON_LEFT_AXIS_WIDTH} tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis
+                      yAxisId="alignment"
+                      orientation="right"
+                      width={MODEL_COMPARISON_RIGHT_AXIS_WIDTH}
+                      domain={[0, 1]}
+                      tick={false}
+                      axisLine={false}
+                      tickLine={false}
+                    />
                     <Tooltip />
                     <Legend />
                     <Bar yAxisId="ic" dataKey="ic" name="Avg IC" fill={COLORS.ic} radius={[6, 6, 0, 0]} />
@@ -1576,11 +1879,11 @@ export const AutoAlphaPage: React.FC = () => {
               <div className="mb-3 text-sm font-medium text-foreground">Sharpe / PnL 对比</div>
               <div className="h-[360px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={modelComparison} margin={{ top: 12, right: 32, bottom: 48, left: 8 }}>
+                  <ComposedChart data={modelComparison} margin={MODEL_COMPARISON_CHART_MARGIN}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis dataKey="model" tick={{ fill: '#64748b', fontSize: 11 }} angle={-12} textAnchor="end" height={54} interval={0} />
-                    <YAxis yAxisId="sharpe" tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <YAxis yAxisId="pnl" orientation="right" tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis yAxisId="sharpe" width={MODEL_COMPARISON_LEFT_AXIS_WIDTH} tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis yAxisId="pnl" orientation="right" width={MODEL_COMPARISON_RIGHT_AXIS_WIDTH} tick={{ fill: '#64748b', fontSize: 11 }} />
                     <Tooltip />
                     <Legend />
                     <Bar yAxisId="sharpe" dataKey="sharpe" name="Sharpe" fill={COLORS.sharpe} radius={[6, 6, 0, 0]} />
@@ -1591,140 +1894,163 @@ export const AutoAlphaPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="mt-5 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <div className="min-w-0 space-y-5">
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
-                  <FileStack className="h-4 w-4 text-sky-500" />
-                  入模因子清单
+          <div className="mt-5 grid min-w-0 items-start gap-5 lg:grid-cols-2">
+            {/* ── Cell 1: 跨模型特征重要性共识 (top-left) ─────────── */}
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 flex items-center gap-2 text-sm font-medium text-foreground">
+                <BrainCircuit className="h-4 w-4 text-violet-500" />
+                跨模型特征重要性共识
+              </div>
+              <div className="mb-4 text-xs leading-5 text-muted-foreground">
+                先把 `run_id / run_id__rank / run_id__csz / run_id__lag1` 聚回原始因子家族，再结合各模型 top features 做轻度表现加权，筛出同时"高重要性 + 多模型重复出现"的关键入模因子。
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">跨模型最重要</div>
+                  <div className="mt-2 break-all text-sm font-semibold text-foreground">
+                    {topConsensusFeature ? topConsensusFeature.factor : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    共识分 {topConsensusFeature ? formatNumber(topConsensusFeature.consensusImportance, 2) : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    主导轨道 {topConsensusFeature?.dominantTrackLabel || '--'}
+                  </div>
                 </div>
-                <div className="mb-3 text-xs text-muted-foreground">
-                  当前 Model Lab 使用全部有效因子入模；点击 run_id 可直接打开对应因子卡片。
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">覆盖模型最多</div>
+                  <div className="mt-2 break-all text-sm font-semibold text-foreground">
+                    {widestSupportFeature ? widestSupportFeature.factor : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {widestSupportFeature ? `${widestSupportFeature.supportCount} 个模型同时使用` : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    代表轨道 {widestSupportFeature?.dominantTrackLabel || '--'}
+                  </div>
                 </div>
-                <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
-                  {(latestModelLab?.selected_factors || []).map((factor) => (
-                    <div key={factor.run_id} className="rounded-2xl bg-slate-50 p-3">
-                      <div className="flex min-w-0 items-center justify-between gap-3">
-                        <button onClick={() => setSelectedRunId(factor.run_id)} className="min-w-0 truncate text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900">
-                          {factor.run_id}
-                        </button>
-                        <div className="shrink-0 text-xs text-muted-foreground">Score {formatNumber(factor.score, 2)}</div>
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">最佳模型首要家族</div>
+                  <div className="mt-2 break-all text-sm font-semibold text-foreground">
+                    {bestModelTopFeatureFamily?.factor || bestModelTopFeatureParsed.baseFactor || '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {latestModelLab?.best_model || '--'} · importance {bestModelTopFeature ? formatNumber(bestModelTopFeature.importance, 2) : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    当前轨道 {bestModelTopFeature ? bestModelTopFeatureParsed.trackLabel : '--'}
+                  </div>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">衍生轨道最丰富</div>
+                  <div className="mt-2 break-all text-sm font-semibold text-foreground">
+                    {richestTrackFeature?.factor || '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {richestTrackFeature ? `${richestTrackFeature.familyFeatureCount} 条轨道同时进入模型` : '--'}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    主导轨道 {richestTrackFeature?.dominantTrackLabel || '--'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+                <div className="rounded-2xl border border-border/50 bg-white/80 p-3 text-[11px] leading-6 text-slate-600">
+                  <span className="font-medium text-slate-800">共识分</span>
+                  {` = Σ(单模型 importance × 模型表现权重 × 排名加成)。`}
+                  {` 模型表现权重≈max(0.7, 1 + Avg IC×10 + Sharpe×0.06)，排名加成会让 top1 比 top8 更重。`}
+                  {` 所以它不是单模型 importance，而是"重要性 × 覆盖度 × 模型质量"的家族级汇总分。`}
+                </div>
+                <div className="rounded-2xl border border-border/50 bg-white/80 p-3 text-[11px] leading-6 text-slate-600">
+                  <span className="font-medium text-slate-800">颜色只表示覆盖模型比例</span>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="rounded-full px-2 py-1 text-white" style={{ backgroundColor: '#0f766e' }}>青绿 = {modelCount || 0}/{modelCount || 0} 模型</span>
+                    <span className="rounded-full px-2 py-1 text-white" style={{ backgroundColor: '#2563eb' }}>蓝 = 覆盖至少 2/3</span>
+                    <span className="rounded-full px-2 py-1 text-white" style={{ backgroundColor: '#7c3aed' }}>紫 = 覆盖至少 1/2</span>
+                    <span className="rounded-full bg-slate-400 px-2 py-1 text-white">灰 = 只在少数模型出现</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 h-[340px]">
+                {featureConsensus.length ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={[...featureConsensus].reverse()}
+                      layout="vertical"
+                      margin={{ top: 8, right: 20, bottom: 8, left: 10 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis type="number" domain={[0, featureConsensusAxisMax]} tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <YAxis type="category" dataKey="shortLabel" width={92} tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <Tooltip
+                        formatter={(value: number) => [formatNumber(Number(value), 3), '共识分']}
+                        labelFormatter={(label, payload) => {
+                          const item = payload?.[0]?.payload as FeatureConsensusPoint | undefined;
+                          if (!item) return String(label);
+                          return `${item.factor} | ${item.models.length}/${modelCount || item.models.length} 模型 | ${item.dominantTrackLabel}`;
+                        }}
+                      />
+                      <Bar dataKey="consensusImportance" radius={[0, 8, 8, 0]}>
+                        {([...featureConsensus].reverse()).map((item) => (
+                          <Cell key={item.factor} fill={featureConsensusColor(item.supportRatio)} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center rounded-2xl bg-slate-50 text-sm text-muted-foreground">
+                    当前还没有足够的模型实验结果来汇总特征重要性。
+                  </div>
+                )}
+              </div>
+
+              {featureConsensus.length ? (
+                <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                  {featureConsensus.slice(0, 4).map((item, index) => (
+                    <div key={item.factor} className="rounded-2xl border border-border/50 bg-slate-50 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Top {index + 1}</div>
+                        <div className="rounded-full bg-white px-2 py-1 text-[10px] text-slate-600">
+                          {item.supportCount} / {Object.keys(latestModelLab?.models || {}).length} 模型
+                        </div>
                       </div>
-                      <div className="mt-2 break-words text-xs leading-6 text-slate-700">{truncate(factor.formula, 120)}</div>
+                      <div className="mt-2">
+                        {item.formula || item.score !== undefined ? (
+                          <button
+                            onClick={() => setSelectedRunId(item.factor)}
+                            className="break-all text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                          >
+                            {item.factor}
+                          </button>
+                        ) : (
+                          <div className="break-all font-mono text-xs font-medium text-foreground">{item.factor}</div>
+                        )}
+                      </div>
+                      <div className="mt-2 text-[11px] leading-5 text-slate-600">
+                        模型结论: {item.models.join(' / ')}
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                        <div>共识分 {formatNumber(item.consensusImportance, 2)}</div>
+                        <div>均值权重 {formatNumber(item.avgImportance, 2)}</div>
+                        <div>主导轨道 {item.dominantTrackLabel}</div>
+                        <div>轨道数 {item.familyFeatureCount}</div>
+                        <div>Score {item.score !== undefined ? formatNumber(item.score, 2) : '--'}</div>
+                        <div>IC {item.ic !== undefined ? formatNumber(item.ic, 3) : '--'}</div>
+                      </div>
+                      {item.formula ? (
+                        <div className="mt-2 break-words text-[11px] leading-5 text-slate-500">
+                          {truncate(item.formula, 100)}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
-                  {!(latestModelLab?.selected_factors || []).length ? <div className="text-sm text-muted-foreground">还没有滚动实验结果。</div> : null}
                 </div>
-              </div>
-
-              <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-                <div className="mb-1 flex items-center gap-2 text-sm font-medium text-foreground">
-                  <BrainCircuit className="h-4 w-4 text-violet-500" />
-                  跨模型特征重要性共识
-                </div>
-                <div className="mb-4 text-xs leading-5 text-muted-foreground">
-                  结合各模型的 top features，并按模型表现做轻度加权，筛出同时“高重要性 + 多模型重复出现”的关键入模因子。
-                </div>
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">跨模型最重要</div>
-                    <div className="mt-2 text-sm font-semibold text-foreground">{topConsensusFeature ? topConsensusFeature.factor : '--'}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">
-                      共识分 {topConsensusFeature ? formatNumber(topConsensusFeature.consensusImportance, 2) : '--'}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">覆盖模型最多</div>
-                    <div className="mt-2 text-sm font-semibold text-foreground">{widestSupportFeature ? widestSupportFeature.factor : '--'}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">
-                      {widestSupportFeature ? `${widestSupportFeature.supportCount} 个模型同时使用` : '--'}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">最佳模型首要特征</div>
-                    <div className="mt-2 text-sm font-semibold text-foreground">{bestModelTopFeature?.factor || '--'}</div>
-                    <div className="mt-1 text-[11px] text-muted-foreground">
-                      {latestModelLab?.best_model || '--'} · importance {bestModelTopFeature ? formatNumber(bestModelTopFeature.importance, 2) : '--'}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 h-[340px]">
-                  {featureConsensus.length ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={[...featureConsensus].reverse()}
-                        layout="vertical"
-                        margin={{ top: 8, right: 20, bottom: 8, left: 10 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis type="number" domain={[0, featureConsensusAxisMax]} tick={{ fill: '#64748b', fontSize: 11 }} />
-                        <YAxis type="category" dataKey="shortLabel" width={92} tick={{ fill: '#64748b', fontSize: 11 }} />
-                        <Tooltip
-                          formatter={(value: number) => [formatNumber(Number(value), 3), '共识分']}
-                          labelFormatter={(label, payload) => {
-                            const item = payload?.[0]?.payload as FeatureConsensusPoint | undefined;
-                            if (!item) return String(label);
-                            return `${item.factor} | ${item.models.join(' / ')}`;
-                          }}
-                        />
-                        <Bar dataKey="consensusImportance" radius={[0, 8, 8, 0]}>
-                          {([...featureConsensus].reverse()).map((item) => (
-                            <Cell key={item.factor} fill={featureConsensusColor(item.supportRatio)} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : (
-                    <div className="flex h-full items-center justify-center rounded-2xl bg-slate-50 text-sm text-muted-foreground">
-                      当前还没有足够的模型实验结果来汇总特征重要性。
-                    </div>
-                  )}
-                </div>
-
-                {featureConsensus.length ? (
-                  <div className="mt-4 grid gap-3 xl:grid-cols-3">
-                    {featureConsensus.slice(0, 3).map((item, index) => (
-                      <div key={item.factor} className="rounded-2xl border border-border/50 bg-slate-50 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Top {index + 1}</div>
-                          <div className="rounded-full bg-white px-2 py-1 text-[10px] text-slate-600">
-                            {item.supportCount} / {Object.keys(latestModelLab?.models || {}).length} 模型
-                          </div>
-                        </div>
-                        <div className="mt-2">
-                          {item.formula || item.score !== undefined ? (
-                            <button
-                              onClick={() => setSelectedRunId(item.factor)}
-                              className="break-all text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
-                            >
-                              {item.factor}
-                            </button>
-                          ) : (
-                            <div className="break-all font-mono text-xs font-medium text-foreground">{item.factor}</div>
-                          )}
-                        </div>
-                        <div className="mt-2 text-[11px] leading-5 text-slate-600">
-                          模型结论: {item.models.join(' / ')}
-                        </div>
-                        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
-                          <div>共识分 {formatNumber(item.consensusImportance, 2)}</div>
-                          <div>均值权重 {formatNumber(item.avgImportance, 2)}</div>
-                          <div>Score {item.score !== undefined ? formatNumber(item.score, 2) : '--'}</div>
-                          <div>IC {item.ic !== undefined ? formatNumber(item.ic, 3) : '--'}</div>
-                        </div>
-                        {item.formula ? (
-                          <div className="mt-2 break-words text-[11px] leading-5 text-slate-500">
-                            {truncate(item.formula, 100)}
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
+              ) : null}
             </div>
 
+            {/* ── Cell 2: 特征重要性 / 预测摘要 (top-right) ───────── */}
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
                 <Sparkles className="h-4 w-4 text-emerald-500" />
@@ -1754,28 +2080,80 @@ export const AutoAlphaPage: React.FC = () => {
                     </div>
                   </div>
                 ))}
-                {!(latestModelLab?.models && Object.keys(latestModelLab.models).length) ? <div className="text-sm text-muted-foreground">当前还没有模型实验结果；现在只要有 1 个有效因子，也可以产出模型实验和整体因子输出。</div> : null}
+                {!(latestModelLab?.models && Object.keys(latestModelLab.models).length) ? (
+                  <div className="text-sm text-muted-foreground">当前还没有模型实验结果；现在只要有 1 个有效因子，也可以产出模型实验和整体因子输出。</div>
+                ) : null}
               </div>
             </div>
-          </div>
-          {latestModelLab?.ensemble_outputs && Object.keys(latestModelLab.ensemble_outputs).length ? (
-            <div className="mt-5 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">整体因子输出</div>
-              <div className="grid min-w-0 gap-3 md:grid-cols-2">
-                {Object.entries(latestModelLab.ensemble_outputs).map(([modelName, path]) => (
-                  <div key={modelName} className="rounded-2xl bg-slate-50 p-3">
-                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{modelName}</div>
-                    <div className="mt-2 break-all font-mono text-xs leading-6 text-foreground">{path}</div>
+
+            {/* ── Cell 3: 入模因子清单 (bottom-left, half-height) ──── */}
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-3 text-sm font-medium text-foreground">入模因子清单</div>
+              <div className="max-h-[260px] overflow-y-auto space-y-2 pr-1">
+                {(latestModelLab?.selected_factors || []).map((factor) => (
+                  <div key={factor.run_id} className="rounded-2xl bg-slate-50 p-3">
+                    <div className="flex min-w-0 items-center justify-between gap-3">
+                      <button
+                        onClick={() => setSelectedRunId(factor.run_id)}
+                        className="min-w-0 truncate text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
+                      >
+                        {factor.run_id}
+                      </button>
+                      <div className="shrink-0 text-xs text-muted-foreground">Score {formatNumber(factor.score, 2)}</div>
+                    </div>
+                    <div className="mt-2 break-words text-xs leading-6 text-slate-700">{truncate(factor.formula, 120)}</div>
                   </div>
                 ))}
+                {!(latestModelLab?.selected_factors || []).length ? (
+                  <div className="text-sm text-muted-foreground">还没有滚动实验结果。</div>
+                ) : null}
               </div>
             </div>
-          ) : null}
+
+            {/* ── Cell 4: 整体因子输出 (bottom-right) ──────────────── */}
+            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+              <div className="mb-1 text-sm font-medium text-foreground">整体因子输出</div>
+              <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                Rolling Model Lab 每次只保留最佳模型的合成 pq 文件，可直接按提交格式使用。点击卡片可查看详情、因子相关性并填入回测结果。
+              </div>
+              {latestModelLab?.ensemble_outputs && Object.keys(latestModelLab.ensemble_outputs).length ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {Object.entries(latestModelLab.ensemble_outputs).map(([mName, path]) => (
+                    <button
+                      key={mName}
+                      onClick={() => setEnsembleModalModel(mName)}
+                      className="rounded-2xl bg-slate-50 p-3 text-left transition-colors hover:bg-slate-100"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">{mName}</div>
+                        {mName === latestModelLab?.best_model && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span>
+                        )}
+                      </div>
+                      <div className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-700">{String(path).split('/').pop()}</div>
+                      <div className="mt-1 text-[10px] text-muted-foreground">点击查看详情 →</div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-muted-foreground">整体因子输出将在首次 Model Lab 运行后出现（每积累 10 个有效因子触发一次）。</div>
+              )}
+            </div>
+          </div>
         </Panel>
 
       </div>
 
       {selectedRunId ? <ResearchModal runId={selectedRunId} onClose={() => setSelectedRunId(null)} /> : null}
+      {ensembleModalModel && latestModelLab ? (
+        <EnsembleModal
+          modelName={ensembleModalModel}
+          modelLab={latestModelLab}
+          factorCorrelations={factorCorrelations}
+          onOpenFactor={setSelectedRunId}
+          onClose={() => setEnsembleModalModel(null)}
+        />
+      ) : null}
     </div>
   );
 };
