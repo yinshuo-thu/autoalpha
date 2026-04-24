@@ -46,11 +46,11 @@ class FeishuNotifier:
         ic = float(metadata.get("IC", 0.0))
         ir = float(metadata.get("IR", 0.0))
         turnover = float(metadata.get("Turnover", 0.0))
-        rank_text = metadata.get("rank") or metadata.get("rank_text") or metadata.get("sequence_index") or ""
         pass_gates = bool(metadata.get("PassGates", False))
         color = "green" if pass_gates else "red"
         formula = metadata.get("formula") or "N/A"
         hyp = metadata.get("hypothesis") or metadata.get("description") or ""
+        tldr = self._clip(metadata.get("tldr") or metadata.get("summary") or "", 90)
 
         card_content = {
             "config": {"wide_screen_mode": True},
@@ -75,7 +75,7 @@ class FeishuNotifier:
                         },
                         {
                             "is_short": True,
-                            "text": {"tag": "lark_md", "content": f"**排名**\n{rank_text or '-'}"},
+                            "text": {"tag": "lark_md", "content": f"**TL;DR**\n{tldr or '-'}"},
                         },
                     ],
                 },
@@ -206,7 +206,7 @@ class FeishuNotifier:
             "rank_ic": float(metrics.get("rank_ic", 0.0)),
             "IR": float(metrics.get("IR", 0.0)),
             "Turnover": float(metrics.get("Turnover", 0.0)),
-            "rank": metrics.get("rank") or metrics.get("rank_text") or "",
+            "tldr": metrics.get("tldr") or metrics.get("summary") or "",
             "formula": formula,
             "hypothesis": description,
             "timestamp": timestamp,
