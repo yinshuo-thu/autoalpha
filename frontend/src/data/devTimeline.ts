@@ -168,4 +168,16 @@ export const devTimeline: DevTimelineEntry[] = [
       '验证：重启 loop 后 Round 1 两个 idea 均显示 "from cache"，零内联 LLM 调用，零网络报错。',
     ],
   },
+  {
+    timestamp: '2026-04-24T09:45:00+08:00',
+    title: '安装 scikit-learn/lightgbm 修复 Rolling Model Lab',
+    summary: '修复 rolling_model_lab 因缺少 scikit-learn、scipy、lightgbm 而无法启动的问题；验证 30 轮连续挖掘可正常触发 Model Lab 更新流程。',
+    tags: ['BugFix', 'ModelLab', 'Dependencies'],
+    bullets: [
+      '安装 scipy（force-reinstall 修复 sparse 子模块缺失）、scikit-learn 1.8.0、lightgbm 4.6.0 到 .venv。',
+      '验证：新 loop 运行后 WARN 消失，Model Lab 将在每 10 个测试因子后自动触发。',
+      '全流程确认：30 轮新 loop Round 1 测试 2/2 过关，Round 2 也全部来自 cache，零内联 LLM。',
+      '当前累计 KB: 1930 tested / 58 passing / best=209.28。',
+    ],
+  },
 ];
