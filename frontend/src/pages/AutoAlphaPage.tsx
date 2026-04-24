@@ -1474,7 +1474,7 @@ export const AutoAlphaPage: React.FC = () => {
   const maxPassingCount = Math.max(...progressChartPoints.map((point) => point.passing), 0);
   const passingAxisMax = Math.max(maxPassingCount > 0 ? Math.ceil(maxPassingCount * 1.5) : 0, 10);
   const maxPassRate = Math.max(...progressChartPoints.map((point) => point.pass_rate), 0);
-  const passRateAxisMax = Math.max(maxPassRate > 0 ? Math.ceil(maxPassRate * 2) : 0, 1);
+  const passRateAxisMax = Math.max(maxPassRate > 0 ? maxPassRate * 1.2 : 0, 1);
   const efficiencyAxisMax = niceUpperBound(Math.max(...progressChartPoints.map((point) => point.generation_efficiency), 0), 5);
   const latestModelLab = modelLab?.latest ?? null;
   const modelLabCurve = buildMergedModelCurves(latestModelLab?.models);
