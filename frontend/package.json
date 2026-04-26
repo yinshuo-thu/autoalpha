@@ -1,7 +1,7 @@
 {
-  "name": "quantaalpha-frontend-v2",
+  "name": "autoalpha-frontend-v2",
   "version": "2.0.0",
-  "description": "AI-Driven Quantitative Factor Mining Platform",
+  "description": "AutoAlpha — AI-driven quantitative factor research UI (Scientech)",
   "type": "module",
   "scripts": {
     "dev": "vite",

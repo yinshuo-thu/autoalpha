@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import gc
 import json
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.submission import ALLOWED_UTC_TIMES, SubmissionBuilder
+from core.evaluator import evaluate_submission_like_wide
 from prepare_data import DataHub
 
 
@@ -26,7 +29,8 @@ EPS = 1e-8
 MANUAL_ROOT = Path(__file__).resolve().parent
 ARTIFACTS_DIR = MANUAL_ROOT / "artifacts"
 REPORTS_DIR = MANUAL_ROOT / "reports"
-SUBMIT_ROOT = Path(__file__).resolve().parents[1] / "submit"
+SUBMIT_ROOT = MANUAL_ROOT / "submit"
+FORBIDDEN_MANUAL_TOKENS = ("resp", "trading_restriction", "lead(", "future_")
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,58 @@ class ManualFactorDataset:
         self.security_count = len(self.columns)
         self.bar_count = len(self.index)
         self._index_frame = self.index.to_frame(index=False)
+
+
+def audit_manual_spec(spec: CandidateSpec) -> dict[str, Any]:
+    expression = (spec.expression or "").replace(" ", "").lower()
+    errors: list[str] = []
+
+    supported_families = {
+        "close_zscore",
+        "range_location",
+        "body_fraction",
+        "wick_imbalance",
+        "vwap_gap",
+        "open_close_return",
+        "gap_return",
+        "bar_return",
+        "volume_conditioned_return",
+        "dvolume_conditioned_return",
+        "trade_conditioned_return",
+        "avg_trade_conditioned_return",
+        "volatility_conditioned_return",
+        "range_conditioned_body",
+        "range_conditioned_location",
+        "vwap_gap_with_dvol",
+        "ema_spread",
+        "multi_horizon_mix",
+        "zscore_vwap_gap",
+        "zscore_body_fraction",
+    }
+    if spec.family not in supported_families:
+        errors.append(f"Unsupported manual family for causality audit: {spec.family}")
+
+    for token in FORBIDDEN_MANUAL_TOKENS:
+        if token in expression:
+            errors.append(f"Forbidden token in manual factor expression: {token}")
+
+    if re.search(r"delay\([^)]*,-\d+", expression):
+        errors.append("Negative delay detected in manual factor expression")
+
+    for key, value in (spec.params or {}).items():
+        if isinstance(value, (int, float)) and value <= 0:
+            errors.append(f"Parameter '{key}' must be > 0, got {value}")
+
+    notes = [
+        "manual factors are restricted to fixed price-volume families implemented in compute_raw()",
+        "only contemporaneous bars, positive lags, rolling windows, and positive-span EMA are allowed",
+        "resp and trading_restriction are touched only after construction during evaluation",
+    ]
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "notes": notes,
+    }
 
 
 def rolling_mean(frame: pd.DataFrame, window: int) -> pd.DataFrame:
@@ -411,6 +467,10 @@ def generate_candidates() -> list[CandidateSpec]:
 
 
 def compute_raw(spec: CandidateSpec, dataset: ManualFactorDataset) -> pd.DataFrame:
+    future_guard = audit_manual_spec(spec)
+    if not future_guard["passed"]:
+        raise ValueError(f"Manual future-info audit failed for {spec.key}: {'; '.join(future_guard['errors'])}")
+
     close = dataset.close
     open_ = dataset.open_
     high = dataset.high
@@ -523,6 +583,7 @@ def select_candidates(results: pd.DataFrame, top_k: int) -> pd.DataFrame:
 def ensure_dirs() -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    SUBMIT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def format_number(value: Any, digits: int = 4) -> str:
@@ -549,8 +610,7 @@ def export_submission(
     dataset: ManualFactorDataset,
 ) -> dict[str, Any]:
     factor_name = f"manual_alpha_{export_rank:03d}"
-    output_dir = SUBMIT_ROOT / f"{factor_name}_{run_stamp}_y"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    submission_metrics = evaluate_submission_like_wide(alpha, dataset.resp, dataset.restriction)
 
     alpha_long = alpha.stack(dropna=False).rename("alpha").to_frame().reset_index()
     alpha_long.columns = ["date", "datetime", "security_id", "alpha"]
@@ -564,6 +624,9 @@ def export_submission(
     alpha_expanded["alpha"] = alpha_expanded["alpha"].fillna(0.0).clip(-1.0, 1.0)
 
     sanity_report = SubmissionBuilder.pre_submit_sanity_check(alpha_expanded, dataset.start_date, dataset.end_date)
+    suffix_flag = "y" if (submission_metrics.get("PassGates", False) and sanity_report.get("submission_ready", False)) else "n"
+    output_dir = SUBMIT_ROOT / f"{factor_name}_{run_stamp}_{suffix_flag}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     submission_path = output_dir / f"{factor_name}_submission.pq"
     SubmissionBuilder.build(alpha_expanded, str(submission_path))
 
@@ -577,24 +640,116 @@ def export_submission(
         "direction": spec.direction,
         "expression": spec.expression,
         "description": spec.description,
-        "PassGates": bool(metrics["PassGates"]),
-        "Score": float(metrics["Score"]),
-        "IC": float(metrics["IC"]),
-        "IR": float(metrics["IR"]),
-        "Turnover": float(metrics["Turnover"]),
-        "maxx": float(metrics["maxx"]),
-        "minn": float(metrics["minn"]),
-        "max_mean": float(metrics["max_mean"]),
-        "min_mean": float(metrics["min_mean"]),
-        "positive_ic_ratio": float(metrics["positive_ic_ratio"]),
+        "PassGates": bool(submission_metrics.get("PassGates", False)),
+        "Score": float(submission_metrics.get("Score", 0.0)),
+        "IC": float(submission_metrics.get("IC", 0.0)),
+        "IR": float(submission_metrics.get("IR", 0.0)),
+        "Turnover": float(submission_metrics.get("Turnover", 0.0)),
+        "maxx": float(submission_metrics.get("maxx", 0.0)),
+        "minn": float(submission_metrics.get("minn", 0.0)),
+        "max_mean": float(submission_metrics.get("max_mean", 0.0)),
+        "min_mean": float(submission_metrics.get("min_mean", 0.0)),
+        "metric_mode": submission_metrics.get("metric_mode", "research"),
+        "research_metrics": {
+            "PassGates": bool(metrics["PassGates"]),
+            "Score": float(metrics["Score"]),
+            "IC": float(metrics["IC"]),
+            "IR": float(metrics["IR"]),
+            "Turnover": float(metrics["Turnover"]),
+            "maxx": float(metrics["maxx"]),
+            "minn": float(metrics["minn"]),
+            "max_mean": float(metrics["max_mean"]),
+            "min_mean": float(metrics["min_mean"]),
+            "positive_ic_ratio": float(metrics["positive_ic_ratio"]),
+        },
         "submission_path": str(submission_path),
         "submission_dir": str(output_dir),
         "metadata_path": str(metadata_path),
         "timestamp": run_stamp,
         "sanity_report": sanity_report,
+        "future_info_check": audit_manual_spec(spec),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    result_preview = submission_metrics.get("result_preview")
+    if result_preview:
+        result_preview_path = output_dir / f"{factor_name}_official_like_result.json"
+        preview_payload = [dict(result_preview, cover_all=int(sanity_report.get("cover_all", 0)))]
+        result_preview_path.write_text(json.dumps(preview_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
     return metadata
+
+
+def rows_to_specs(rows: pd.DataFrame) -> list[tuple[CandidateSpec, dict[str, Any]]]:
+    specs: list[tuple[CandidateSpec, dict[str, Any]]] = []
+    for row in rows.to_dict(orient="records"):
+        params = row["params"]
+        if not isinstance(params, dict):
+            params = ast.literal_eval(str(params))
+        spec = CandidateSpec(
+            family=row["family"],
+            family_label=row["family_label"],
+            params=params,
+            direction=int(row["direction"]),
+            expression=row["expression"],
+            description=row["description"],
+        )
+        specs.append((spec, row))
+    return specs
+
+
+def export_from_existing_results(
+    csv_path: Path,
+    dataset: ManualFactorDataset,
+    passing_only: bool = True,
+    export_limit: int | None = None,
+    row_offset: int = 0,
+    rank_offset: int = 0,
+    run_stamp_override: str | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    results_df = pd.read_csv(csv_path)
+    if passing_only:
+        results_df = results_df[results_df["PassGates"]].copy()
+    results_df = results_df.sort_values(["Score", "IC", "IR"], ascending=False).reset_index(drop=True)
+    if row_offset:
+        results_df = results_df.iloc[row_offset:].reset_index(drop=True)
+    if export_limit is not None:
+        results_df = results_df.head(export_limit).copy()
+    if results_df.empty:
+        raise RuntimeError(f"No rows to export from {csv_path}")
+
+    run_stamp = run_stamp_override or datetime.now().strftime("%Y%m%d_%H%M%S")
+    exported: list[dict[str, Any]] = []
+    specs = rows_to_specs(results_df)
+
+    print(
+        f"[manual] export-only mode | source={csv_path} rows={len(specs)} "
+        f"passing_only={passing_only} run_stamp={run_stamp}"
+    )
+
+    for rank, (spec, row) in enumerate(specs, start=1 + rank_offset):
+        started = time.time()
+        raw = compute_raw(spec, dataset)
+        alpha = cs_rank(raw).astype("float32").replace([np.inf, -np.inf], np.nan)
+        metadata = export_submission(alpha, spec, row, rank, run_stamp, dataset)
+        elapsed = time.time() - started
+        exported.append(metadata)
+        print(
+            f"[manual] exported {rank:02d}/{len(specs)} {metadata['factor_name']} "
+            f"| family={metadata['family']} score={metadata['Score']:.3f} "
+            f"| ready={metadata['sanity_report'].get('submission_ready')} "
+            f"| elapsed={elapsed:.1f}s"
+        )
+        del raw, alpha
+        gc.collect()
+
+    export_json = ARTIFACTS_DIR / f"manual_factor_export_manifest_{run_stamp}.json"
+    export_csv = ARTIFACTS_DIR / f"manual_factor_export_manifest_{run_stamp}.csv"
+    export_json.write_text(json.dumps(exported, indent=2, ensure_ascii=False), encoding="utf-8")
+    pd.DataFrame(exported).to_csv(export_csv, index=False)
+    print(f"[manual] wrote export manifest -> {export_json}")
+    print(f"[manual] wrote export manifest -> {export_csv}")
+    return exported, run_stamp
 
 
 def build_report(
@@ -674,7 +829,8 @@ def build_report(
 2. Explore multiple manual families: short-term price stretch, bar-shape structure, VWAP gaps, gap/return continuation-vs-reversal, and liquidity-conditioned variants.
 3. For each family/parameter set, test both orientations (`pro` and `anti`) because some signals work as continuation and some work as reversal.
 4. Keep all candidate metrics in `manual/artifacts/`, then select the final submission set from gate-passing candidates.
-5. Recompute each selected factor and export a submission-ready parquet plus metadata under `submit/`.
+5. Recompute each selected factor and export a submission-ready parquet plus metadata under `manual/submit/`.
+6. Before each compute/export step, run `audit_manual_spec()` to reject forbidden labels, negative delays, or non-positive windows.
 
 ## Search Summary
 - Candidate count: `{candidate_count}`
@@ -720,7 +876,8 @@ def build_report(
 
 ## Notes
 - `pro` means we keep the raw signal direction before ranking; `anti` means we flip it first.
-- Exported submissions live under `submit/manual_alpha_*_{run_stamp}_y/`.
+- Exported submissions live under `manual/submit/manual_alpha_*_{run_stamp}_y/`.
+- Every exported metadata JSON now includes a `future_info_check` section for audit traceability.
 - The report is auto-generated from the actual run outputs, so it matches the saved metrics and metadata.
 """
     return report
@@ -729,12 +886,52 @@ def build_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run manual factor search and export top candidates.")
     parser.add_argument("--top-k", type=int, default=20, help="Number of final gate-passing factors to export.")
+    parser.add_argument(
+        "--export-csv",
+        type=str,
+        help="Export factors from an existing result CSV instead of running a fresh search.",
+    )
+    parser.add_argument(
+        "--export-limit",
+        type=int,
+        help="Optional maximum number of rows to export in --export-csv mode.",
+    )
+    parser.add_argument(
+        "--export-row-offset",
+        type=int,
+        default=0,
+        help="Skip the first N sorted rows in --export-csv mode.",
+    )
+    parser.add_argument(
+        "--export-rank-offset",
+        type=int,
+        default=0,
+        help="Start exported factor numbering after this many rows in --export-csv mode.",
+    )
+    parser.add_argument(
+        "--run-stamp",
+        type=str,
+        help="Optional run stamp override for export directories, e.g. 20260410_165637.",
+    )
     args = parser.parse_args()
 
     ensure_dirs()
-    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     dataset = ManualFactorDataset()
+
+    if args.export_csv:
+        exported, run_stamp = export_from_existing_results(
+            csv_path=Path(args.export_csv),
+            dataset=dataset,
+            passing_only=True,
+            export_limit=args.export_limit,
+            row_offset=args.export_row_offset,
+            rank_offset=args.export_rank_offset,
+            run_stamp_override=args.run_stamp,
+        )
+        print(f"[manual] export-only completed | count={len(exported)} run_stamp={run_stamp}")
+        return
+
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     candidates = generate_candidates()
     print(
         "[manual] loaded dataset | "
@@ -747,6 +944,7 @@ def main() -> None:
 
     for idx, spec in enumerate(candidates, start=1):
         started = time.time()
+        future_info_check = audit_manual_spec(spec)
         raw = compute_raw(spec, dataset)
         alpha = cs_rank(raw).astype("float32")
         alpha = alpha.replace([np.inf, -np.inf], np.nan)
@@ -761,6 +959,8 @@ def main() -> None:
             "direction_label": spec.direction_label,
             "expression": spec.expression,
             "description": spec.description,
+            "future_info_check": future_info_check,
+            "future_info_check_passed": future_info_check["passed"],
             "elapsed_seconds": round(time.time() - started, 3),
             **metrics,
         }

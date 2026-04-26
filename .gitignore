@@ -1,31 +1,118 @@
-# Data & Cache
-eq_data_stage*
-eq_resp_stage*
-eq_trading_restriction_stage*
+# AutoAlpha source-control policy:
+# keep project code and documentation in Git; keep local data, generated
+# submissions, caches, credentials, and built artifacts out of Git.
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_key*
+*_secret*
+secrets/
+
+# Python environments and caches
+.venv/
+venv/
+.conda/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Node / frontend generated assets
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# Logs, process state, temporary files
+*.log
+*.pid
+*.tmp
+*.bak
+*.swp
+cloudflared*.log
+cloudflared*.pid
+frontend.pid
+server.pid
+server.public.pid
+
+# macOS / IDE artifacts
+.DS_Store
+._*
+.AppleDouble/
+.LSOverride
+.vscode/
+.idea/
+.playwright-cli/
+.claude/
+scratch/
+CLAUDE*.md
+CODEX_CHANGELOG.md
+scripts/extract_scientech_challenge*
+patch_*.py
+test_api_*.py
+test_feishu_push.py
+test_httpx.py
+test_requests_long.py
+test_llm_factor_gen.py
+review_*.md
+simulator_TODO_*.md
+challenge_summary.md
+draw.md
+submit.md
+summary.md
+simple diagram.png
+framework1.png
+
+# Raw and derived data
+*.pq
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.db
+*.sqlite
+*.sqlite3
+eq_data_stage*/
+eq_resp_stage*/
+eq_trading_restriction_stage*/
 data.pq
 universe/
 cache/
-outputs/*.pq
-research_runs/*.json
-submit/**/*.pq
+数据及因子/
 
-# Environments
-.conda/
-.venv/
-node_modules/
+# Generated AutoAlpha runtime state
+autoalpha/
+outputs/
+summaries/
+submit/
+manual/artifacts/
+manual/reports/
+manual/submit/
+autoalpha_v2/output/
+autoalpha_v2/submit/
+autoalpha_v2/process_logs/
+autoalpha_v2/model_lab/
+autoalpha_v2/research/
+autoalpha_v2/autoalpha_lab.db
+autoalpha_v2/knowledge*.json
+autoalpha_v2/factor_correlations.json
+autoalpha_v2/loop.log
+autoalpha_v2/loop.pid
+autoalpha_v2/loop_state.json
 
-# Logs
-*.log
-
-# Pycache
-__pycache__/
-*.pyc
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Frontend
-frontend/dist/
+# Keep selected documentation and source files under autoalpha_v2 tracked.
+!autoalpha_v2/README.md
+!autoalpha_v2/README.en.md
+!autoalpha_v2/README.zh-CN.md
+!autoalpha_v2/*.py
+!autoalpha_v2/*.md
+!autoalpha_v2/v2.png

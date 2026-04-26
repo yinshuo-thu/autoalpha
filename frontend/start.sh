@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-echo "🚀 启动 QuantaAlpha AI V2..."
+echo "🚀 启动 AutoAlpha UI..."
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,19 +18,19 @@ fi
 echo "✅ Node.js: $(node --version)"
 
 # =============================================================================
-# 激活 conda 环境（使用与主实验相同的 quantaalpha 环境）
+# 激活 conda 环境（默认 autoalpha，可用 CONDA_ENV_NAME 覆盖）
 # =============================================================================
 eval "$(conda shell.bash hook)" 2>/dev/null
-CONDA_ENV="${CONDA_ENV_NAME:-quantaalpha}"
+CONDA_ENV="${CONDA_ENV_NAME:-autoalpha}"
 conda activate "${CONDA_ENV}" 2>/dev/null
 
 if [ $? -ne 0 ]; then
     source activate "${CONDA_ENV}" 2>/dev/null
 fi
 
-if ! python -c "import quantaalpha" 2>/dev/null; then
-    echo "❌ 错误: quantaalpha 包未安装"
-    echo "请先运行: conda activate ${CONDA_ENV} && cd ${PROJECT_ROOT} && pip install -e ."
+if ! python -c "import flask, flask_cors" 2>/dev/null; then
+    echo "❌ 错误: Flask 后端依赖未安装在当前 Python 环境中"
+    echo "请先运行: conda activate ${CONDA_ENV} && pip install flask flask-cors"
     exit 1
 fi
 echo "✅ Python: $(python --version) (conda env: ${CONDA_ENV})"
@@ -66,7 +66,7 @@ fi
 # 安装后端依赖（在 conda 环境中）
 # =============================================================================
 echo "📦 检查/安装后端 Python 依赖..."
-pip install -q fastapi uvicorn websockets python-multipart python-dotenv pyyaml 2>/dev/null || true
+pip install -q flask flask-cors 2>/dev/null || true
 echo "✅ 后端依赖就绪"
 
 # =============================================================================
@@ -84,30 +84,30 @@ BACKEND_PID=""
 BACKEND_REUSED=false
 
 echo ""
-echo "🔍 检测后端服务 (端口 8000)..."
-if curl -s --connect-timeout 2 http://localhost:8000/api/health > /dev/null 2>&1; then
-    echo "✅ 后端服务已在运行中 (端口 8000)，复用现有服务"
+echo "🔍 检测后端服务 (端口 8080)..."
+if curl -s --connect-timeout 2 http://localhost:8080/api/health > /dev/null 2>&1; then
+    echo "✅ 后端服务已在运行中 (端口 8080)，复用现有服务"
     BACKEND_REUSED=true
-    BACKEND_PID=$(lsof -ti:8000 2>/dev/null | head -1)
+    BACKEND_PID=$(lsof -ti:8080 2>/dev/null | head -1)
 else
     # 清理可能占用端口但未正常服务的残留进程
-    OLD_PID=$(lsof -ti:8000 2>/dev/null)
+    OLD_PID=$(lsof -ti:8080 2>/dev/null)
     if [ -n "$OLD_PID" ]; then
-        echo "⚠️  端口 8000 被占用但服务异常，清理残留进程 (PID: $OLD_PID)..."
+        echo "⚠️  端口 8080 被占用但服务异常，清理残留进程 (PID: $OLD_PID)..."
         kill $OLD_PID 2>/dev/null
         sleep 1
         kill -9 $OLD_PID 2>/dev/null 2>&1
     fi
 
-    echo "🔧 启动后端服务 (端口 8000)..."
-    cd "${SCRIPT_DIR}"
-    python backend/app.py &
+    echo "🔧 启动后端服务 (端口 8080)..."
+    cd "${PROJECT_ROOT}"
+    python server.py &
     BACKEND_PID=$!
 
     # 等待后端启动
     sleep 3
 
-    if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
+    if curl -s http://localhost:8080/api/health > /dev/null 2>&1; then
         echo "✅ 后端服务启动成功 (PID: $BACKEND_PID)"
     else
         echo "❌ 后端启动失败，请检查日志"
@@ -154,8 +154,7 @@ echo "   本机:     http://localhost:3000"
 if [ "$HOST_IP" != "localhost" ]; then
 echo "   局域网:   http://${HOST_IP}:3000"
 fi
-echo "   后端 API: http://localhost:8000"
-echo "   API 文档: http://localhost:8000/docs"
+echo "   后端 API: http://localhost:8080"
 echo ""
 if [ "$BACKEND_REUSED" = true ] || [ "$FRONTEND_REUSED" = true ]; then
 echo "ℹ️  部分服务为复用已有进程（多用户共享模式）"

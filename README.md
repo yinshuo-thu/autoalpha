@@ -1,111 +1,205 @@
-# Auto Alpha Research Factory v0
+# AutoAlpha v2
 
-An autonomous quantitative alpha research system built for the **Scientech Labs Equity Alpha Research 2026** competition. It covers the full pipeline: historical price/volume ingestion, factor generation (LLM and/or evolutionary search over a DSL), compliance checks, evaluation (IC / IR / turnover / concentration), local leaderboard storage, and Parquet submission packaging.
+![AutoAlpha v2 research cockpit](autoalpha_v2/v2.png)
 
-## Architecture
+AutoAlpha v2 is an AI-assisted quantitative alpha research cockpit for the Scientech Labs Equity Alpha Research workflow. The project combines factor ideation, formula evaluation, knowledge-base memory, rolling model experiments, OOS combo research, and a React dashboard served by a Flask backend.
 
-The repo follows a **two-tier** mental model: an **online research workflow** (generate → parse → comply → screen → score) and a **knowledge & deployment layer** (experience memory, alpha library, `.pq` submission, downstream combination and backtests). The figure below matches this layout.
+The public display build is currently served at [https://autoalpha.cn/v2](https://autoalpha.cn/v2). The display deployment uses a snapshot-only directory (`/Volumes/T7/autoalpha_v2_display`) so the website can be shown without raw parquet datasets or live mining services.
 
-![Online Research Workflow — two-tier architecture](framework2.png)
+## What Is Included
 
-| Layer | Role in this codebase |
-|--------|------------------------|
-| **Data inputs** | `prepare_data.py` (`DataHub`): loads 1-min OHLCV Parquet, resamples to 15-min bars; `core/datahub.py` provides aligned loaders for evaluation and submission windows. |
-| **Factor generation** | `factor_idea_generator.py` (LLM-assisted ideas), `research_loop.py` + `core/genalpha.py` (EA / parent-based mutation), with operators from `operator_catalog.py` and formulas parsed by `formula_parser.py`. |
-| **DSL / AST & compliance** | Formulas compile to an AST and are checked by `compliance_guard.py` (no `resp` / `trading_restriction` in formulas, bounds, structure). |
-| **Screening & validation** | `quick_test.py` / `evaluate_alpha.py` compute IC, IR, turnover, concentration; gates align with the competition score `score = (IC - 0.0005 * tvr) * sqrt(IR) * 100` (see Metrics). |
-| **Experience memory** | Conveyed practically by `leaderboard.json` and research logs: successful vs rejected patterns inform the next iteration (top parents for EA/LLM). |
-| **Alpha library & submission** | `leaderboard.py` persists candidates; `core/submission.py` packages passing alphas as 15-min `.pq` grids. |
-| **Downstream** | `core/combiner.py` (ensembles), `simulate_strategy.py` (strategy simulation), and the UI via `server.py`. |
+- LLM-assisted factor idea generation and prompt memory.
+- Formula parsing, leakage checks, and submission-like evaluation.
+- A local knowledge base of tested factors, gate status, scores, IC/IR/TVR, and research notes.
+- Rolling model lab and exploratory OOS combo lab.
+- Full-factor and low-correlation 8-factor combo comparisons on 2024 OOS data.
+- ML benchmarks over raw/rank/z-score factor features: Ridge, RandomForest, ExtraTrees, HistGradientBoosting, LightGBM, and MLP.
+- React + Recharts frontend for research monitoring, factor records, inspirations, and combo cards.
+- Display-only Flask server that serves precomputed JSON snapshots and static assets.
 
-## Competition Overview
+## Latest OOS Combo Snapshot
 
-| Item | Detail |
-|------|--------|
-| Data | 1-min OHLCV bars (2022–2024), resampled to 15-min |
-| Submission format | 15-min frequency alpha grid (Parquet) |
-| Scoring | `score = (IC - 0.0005 * tvr) * sqrt(IR) * 100` |
-| IC target | > 0.6 (scaled ×100) |
-| IR target | > 2.5 |
-| Turnover target | tvr < 400 |
-| Concentration | maxx/minn < 50 bps, avg < 20 bps |
-| In-Sample phase | Mar 16 – Jun 10, 2026 (max 200 submissions) |
-| OOS phase | May 15 – Jun 10, 2026 (max 20 submissions) |
-| Final presentation | June 5, 2026 |
+The latest computed exploratory combo lab uses a chronological split:
 
-## Project Structure
+- Train: `2022-01-04` to `2023-12-29`
+- Validation: last two visible train months inside 2022-2023
+- Test: `2024-01-02` to `2024-12-31`
+- No 2024 labels are used for fitting weights, model parameters, method selection, or validation.
 
-```
+| Lab | Best model | Factor set | 2024 OOS Score | IC | IR | TVR |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Full factor combo | `RidgeZScoreMetaModel` | 96 | 8659.93 | 12.12 | 51.61 | 136.08 |
+| Low-correlation combo | `LightGBMMetaModel` | 8 | 4399.31 | 7.91 | 31.48 | 136.28 |
+
+Each combo card in the UI includes the method description, leakage guard, Train/Val/OOS metric comparison, TVR, and OOS time-series comparison.
+
+## Repository Layout
+
+```text
 .
-├── core/
-│   ├── datahub.py          # Loaders & calendar alignment for eval / submission
-│   ├── evaluator.py        # IC / IR / tvr / concentration metrics
-│   ├── genalpha.py         # Evolutionary alpha generator (DSL + mutation)
-│   ├── submission.py       # Submission packaging & gate checks
-│   └── combiner.py         # Multi-factor ensemble combiner
-├── frontend/               # Vite/React dashboard UI
-├── factors/                # Saved factor formula files
-├── submit/                 # Packaged submission artifacts (*.pq excluded from git)
-├── outputs/                # Backtest outputs
-├── prepare_data.py         # DataHub: 1-min → 15-min cache
-├── leaderboard.py          # Local leaderboard tracker
-├── research_loop.py        # Autonomous EA/LLM research loop
-├── evaluate_alpha.py       # CLI: evaluate a single alpha
-├── factor_idea_generator.py # LLM-assisted factor ideation
-├── formula_parser.py       # DSL → AST parser
-├── compliance_guard.py     # Leakage & restriction checker
-├── quick_test.py           # Formula evaluation & metric computation
-├── simulate_strategy.py    # Strategy simulation
-└── server.py               # Flask backend for the UI & API
+├── autoalpha_v2/              # AutoAlpha v2 research package and runtime state
+│   ├── rolling_model_lab.py   # OOS combo lab and ML/meta-model experiments
+│   ├── pipeline.py            # idea -> formula -> evaluate workflow
+│   ├── knowledge_base.py      # factor knowledge-base persistence
+│   ├── llm_client.py          # LLM routing and prompt calls
+│   ├── inspiration_db.py      # inspiration/prompt database utilities
+│   └── v2.png                 # README hero image
+├── core/                      # data loading, evaluator, submission utilities
+├── factors/                   # factor formula library and prompts
+├── frontend/                  # React/Vite dashboard
+├── fut_feat/                  # imported factor inspiration notes
+├── manual/                    # manual prompt/research artifacts
+├── research/                  # notebooks/configs/research notes
+├── scripts/                   # maintenance and snapshot helper scripts
+├── server.py                  # live Flask API + frontend server
+├── runtime_config.py          # runtime config loader/saver
+├── prepare_data.py            # data hub and raw-data alignment entrypoint
+└── requirements.txt           # Python dependency baseline
 ```
 
-## DSL Formula Language
+Large runtime outputs are intentionally excluded from Git:
 
-Alphas are expressed in a proprietary DSL that maps to an AST evaluated over 15-min bar data.
+- raw and derived parquet files (`*.pq`, `*.parquet`)
+- local SQLite databases (`*.db`, `*.sqlite*`)
+- generated submit/output/model-lab artifacts
+- frontend `node_modules` and `dist`
+- logs, pid files, Python caches, macOS AppleDouble files
 
-- **Time-series**: `ts_mean`, `ts_std`, `ts_corr`, `ts_rank`, `ts_decay_linear`, `delta`, `delay`
-- **Cross-sectional**: `rank`, `zscore`, `demean`, `scale`
-- **Math**: `abs`, `log`, `sign`, `ifelse`, `+`, `-`, `*`, `/`
+## Runtime Directories
 
-Available fields: `open`, `high`, `low`, `close`, `volume`, `vwap`, `amount`
+The project has two local runtime directories:
+
+| Directory | Purpose |
+| --- | --- |
+| `/Volumes/T7/autoalpha_v2` | Full research workspace. Can run mining, evaluation, model lab, and frontend/backend. |
+| `/Volumes/T7/autoalpha_v2_display` | Display-only deployment. Contains built frontend, compact JSON snapshots, and selected display parquet outputs only. |
+
+The display directory does not import the research package and does not need raw parquet files. It serves precomputed snapshots for faster public access.
 
 ## Quick Start
 
-```bash
-# 1. Activate environment (example)
-conda activate alphaclaw
+### 1. Python environment
 
-# 2. Backend (Flask API on http://127.0.0.1:8080)
+```bash
+cd /Volumes/T7/autoalpha_v2
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+The local machine currently uses Conda Python for large experiments. If using Conda:
+
+```bash
+conda activate <your-env>
+pip install -r requirements.txt
+```
+
+### 2. Frontend dependencies
+
+```bash
+cd /Volumes/T7/autoalpha_v2/frontend
+npm install
+npm run build
+```
+
+### 3. Live research server
+
+```bash
+cd /Volumes/T7/autoalpha_v2
 python server.py
-
-# 3. Frontend (separate terminal)
-cd frontend && npm install && npm run dev
 ```
 
-See `frontend/README.md` for UI-specific notes and any bundled `start` scripts.
+The live server defaults to:
 
-## Evaluate & Submit a Factor
+- Backend/API: `http://127.0.0.1:8080`
+- Frontend path: `http://127.0.0.1:8080/v2/`
+
+### 4. Display-only server
 
 ```bash
-# Evaluate a formula string
-python evaluate_alpha.py --formula "rank(ts_mean(close/vwap, 20))" --name alpha_001
-
-# Package for submission (checks quality gates before writing .pq)
-python -m core.submission
+cd /Volumes/T7/autoalpha_v2_display
+./start_display.sh
 ```
 
-## Compliance Rules
+The display server is read-only and serves:
 
-- **No future data**: `resp` and `trading_restriction` fields are forbidden in factor formulas.
-- **Coverage**: Alpha grid must cover every trading day in the evaluation window.
-- **Bounds**: Output must be finite and bounded; `zscore` or `scale` recommended as final step.
+- Local display: `http://127.0.0.1:8080/v2/`
+- Public tunnel target: `https://autoalpha.cn/v2`
 
-## Metrics Reference
+## Running The Combo Lab
 
-| Metric | Formula | Gate |
-|--------|---------|------|
-| IC | mean daily Pearson corr(alpha, resp) × 100 | > 0.6 |
-| IR | IC.mean() / IC.std() × √252 | > 2.5 |
-| tvr | mean daily turnover | < 400 |
-| maxx | max single-stock weight (bps) | < 50 |
-| Score | `(IC - 0.0005×tvr) × √IR × 100` | higher is better |
+Full-factor lab:
+
+```bash
+PYTHONPATH=/Volumes/T7/autoalpha_v2 python -m autoalpha_v2.rolling_model_lab \
+  --target-valid 96 \
+  --ideas-per-round 0 \
+  --max-rounds 0 \
+  --allow-partial
+```
+
+Low-correlation 8-factor lab:
+
+```bash
+PYTHONPATH=/Volumes/T7/autoalpha_v2 python -m autoalpha_v2.rolling_model_lab \
+  --run-low-corr-experiment
+```
+
+The lab exports compact summaries under `autoalpha_v2/model_lab/` and submit-ready outputs under `autoalpha_v2/submit/`. These runtime artifacts are excluded from source control.
+
+## Frontend Notes
+
+The dashboard is built with:
+
+- React 18
+- TypeScript
+- Vite
+- Tailwind CSS
+- Recharts
+- lucide-react
+
+The UI is organized around:
+
+- AutoAlpha Research Cockpit
+- Prompt Lab
+- Loop control and live logs
+- Factor records
+- Inspiration browser
+- Exploratory OOS Combo Lab
+- Combo Card drilldowns
+
+For production builds under `/v2`, `frontend/vite.config.ts` reads `AUTOALPHA_APP_BASE` and defaults to `/v2/`.
+
+## Data And Secret Policy
+
+This repository is meant to publish project code, not private runtime data. Do not commit:
+
+- raw market parquet files
+- generated submission parquet files
+- local SQLite databases
+- API keys or `.env` files
+- process logs with private endpoints
+- `node_modules`
+
+Before publishing, run:
+
+```bash
+git status --short
+git ls-files | rg '(\.pq$|\.parquet$|\.db$|\.sqlite|\.env|node_modules|__pycache__)'
+```
+
+The expected result for the second command is empty.
+
+## Deployment Snapshot Workflow
+
+1. Build frontend in `/Volumes/T7/autoalpha_v2/frontend`.
+2. Sync `frontend/dist` to `/Volumes/T7/autoalpha_v2_display/frontend/dist`.
+3. Write compact JSON snapshots to `/Volumes/T7/autoalpha_v2_display/data/snapshots`.
+4. Copy selected display outputs to `/Volumes/T7/autoalpha_v2_display/data/submit`.
+5. Restart `/Volumes/T7/autoalpha_v2_display/start_display.sh`.
+
+The snapshot API is intentionally read-only. Mutating endpoints return `403` in display mode.
+
+## License And Competition Data
+
+The code can be shared in the project repository. Competition data, generated parquet outputs, credentials, and local databases remain outside Git because they may be large, private, or environment-specific.

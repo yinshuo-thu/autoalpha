@@ -5,7 +5,16 @@ Stage 1: Syntax check (via parser)
 Stage 2: Whitelist check (fields + operators)
 Stage 3: Leakage / future-function risk check
 """
-from formula_parser import parse_formula, collect_fields, collect_operators, ParseError
+from formula_parser import (
+    parse_formula,
+    collect_fields,
+    collect_operators,
+    ParseError,
+    NumberNode,
+    FuncCallNode,
+    BinaryOpNode,
+    UnaryOpNode,
+)
 from data_catalog import RAW_FIELDS, FORBIDDEN_FIELDS, DERIVED_FIELD_TEMPLATES
 from operator_catalog import ALLOWED_OPERATORS
 
@@ -89,8 +98,10 @@ def validate_formula(formula_text, registered_assets=None):
     # Map common aliases
     ALIASES = {
         'cs_rank': 'rank', 'cs_zscore': 'zscore', 'cs_demean': 'demean',
+        'cs_scale': 'scale', 'cs_winsorize': 'winsorize',
         'safe_div': 'div', 'signed_power': 'pow', 'lag': 'delay',
         'ts_decay_linear': 'decay_linear',
+        'clamp': 'clip',
     }
 
     for op in operators:
@@ -111,11 +122,18 @@ def validate_formula(formula_text, registered_assets=None):
         if f in FUTURE_RISK_PATTERNS:
             result.add_error(f"⛔ LEAKAGE: {FUTURE_RISK_PATTERNS[f]}")
 
+    _check_temporal_arguments(ast, result)
+
     # Warn about potential issues
     if 'ts_corr' in operators or 'ts_cov' in operators:
         result.add_warning(
             "ts_corr/ts_cov with small windows may be noisy. "
             "Consider window >= 20 for stability."
+        )
+    if any(op in operators for op in ('ifelse', 'gt', 'lt', 'ge', 'le', 'eq', 'and_op', 'or_op')):
+        result.add_warning(
+            "Conditional operators can create discontinuous signals and higher turnover. "
+            "Prefer smoothing after hard gates when possible."
         )
 
     if any(f.startswith('open_') for f in fields):
@@ -125,3 +143,80 @@ def validate_formula(formula_text, registered_assets=None):
         )
 
     return result
+
+
+LOOKBACK_ARG_INDEX = {
+    "delay": 1,
+    "lag": 1,
+    "delta": 1,
+    "ts_mean": 1,
+    "ts_std": 1,
+    "ts_sum": 1,
+    "ts_max": 1,
+    "ts_min": 1,
+    "ts_median": 1,
+    "ts_quantile": 1,
+    "ts_skew": 1,
+    "ts_kurt": 1,
+    "ts_ema": 1,
+    "ts_argmax": 1,
+    "ts_argmin": 1,
+    "ts_pct_change": 1,
+    "ts_minmax_norm": 1,
+    "ts_rank": 1,
+    "ts_zscore": 1,
+    "ts_corr": 2,
+    "ts_cov": 2,
+    "decay_linear": 1,
+    "ts_decay_linear": 1,
+}
+
+
+def _walk_ast(node):
+    yield node
+    if isinstance(node, FuncCallNode):
+        for arg in node.args:
+            yield from _walk_ast(arg)
+    elif isinstance(node, BinaryOpNode):
+        yield from _walk_ast(node.left)
+        yield from _walk_ast(node.right)
+    elif isinstance(node, UnaryOpNode):
+        yield from _walk_ast(node.operand)
+
+
+def _literal_number(node):
+    if isinstance(node, NumberNode):
+        return float(node.value)
+    if isinstance(node, UnaryOpNode) and node.op == "-" and isinstance(node.operand, NumberNode):
+        return -float(node.operand.value)
+    return None
+
+
+def _check_temporal_arguments(ast, result):
+    for node in _walk_ast(ast):
+        if not isinstance(node, FuncCallNode):
+            continue
+        if node.name not in LOOKBACK_ARG_INDEX:
+            continue
+        arg_index = LOOKBACK_ARG_INDEX[node.name]
+        if len(node.args) <= arg_index:
+            result.add_error(f"Function '{node.name}' is missing its lookback argument.")
+            continue
+        lookback_node = node.args[arg_index]
+        lookback_value = _literal_number(lookback_node)
+        if lookback_value is None:
+            result.add_error(
+                f"⛔ LOOKAHEAD RISK: '{node.name}' lookback must be a numeric literal, "
+                "not a dynamic expression."
+            )
+            continue
+        if int(lookback_value) != lookback_value:
+            result.add_error(
+                f"⛔ LOOKAHEAD RISK: '{node.name}' lookback must be an integer, got {lookback_value}."
+            )
+            continue
+        if lookback_value <= 0:
+            result.add_error(
+                f"⛔ LOOKAHEAD RISK: '{node.name}' lookback must be > 0 to avoid future information, "
+                f"got {int(lookback_value)}."
+            )
