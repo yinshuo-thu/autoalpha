@@ -9,6 +9,78 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-26T22:05:00+08:00',
+    title: 'README 重写、发布工作区清理与 GitHub main 推送',
+    summary: '把当前 AutoAlpha v2 的展示定位、最新 Combo/Fusion 结果、运行方式和不包含原始 parquet 的发布边界写入 README；同步发布工作区并推送到 GitHub main。',
+    tags: ['Docs', 'GitHub', 'Release', 'Cleanup'],
+    bullets: [
+      'README 更新为当前完整项目说明，补充 deployed showcase、display-only 目录、最新 full-factor / low-corr / fusion 结果。',
+      '发布工作区同步源码但排除原始 parquet、SQLite、node_modules、dist、运行日志和大体积派生目录。',
+      '补齐 server compact summary 对 long-only PnL/DD 曲线字段的输出，避免展示端缺少纯多头图。',
+      '验证：Python py_compile、frontend npm build、diff whitespace、大文件扫描、secret/token 扫描均完成；提交 1e0dac6 已推送到 GitHub main。',
+    ],
+  },
+  {
+    timestamp: '2026-04-26T19:40:00+08:00',
+    title: 'Model Fusion Lab 扩展为全模型相关性与融合诊断',
+    summary: '把模型融合实验从少数 ML 模型扩展到所有正验证模型输出，新增完整相关性热图、融合候选机制和 OOS 指标展示。',
+    tags: ['Model Fusion', 'Visualization', 'Frontend', 'Model Lab'],
+    bullets: [
+      '新增 scripts/build_model_fusion_lab.py 与 scripts/export_fusion_candidates.py，基于 frozen model outputs 生成 Val softmax、inverse-corr、greedy diversity、Transformer anchor 等融合候选。',
+      'Fusion 选择规则只使用 2022-2023 Train/Val 指标和冻结输出相关性；2024 label 仅用于权重冻结后的 OOS 报告。',
+      '前端热图扩展为 25×25，覆盖线性、Rank/Combo、ML/DL/Transformer 等方法；色轴改为 |corr|=0 蓝、|corr|=1 红。',
+      '方法摘要列表按方法家族着色，CausalDecayFactorTransformerStackModel、FactorTokenTransformerRidgeStackModel 等归入 ML/DL 家族颜色。',
+    ],
+  },
+  {
+    timestamp: '2026-04-26T16:20:00+08:00',
+    title: 'Combo 时序图从 spread 改为 PnL + Max DD',
+    summary: '停止展示容易误读的预测 spread 对齐图，改为更接近组合效果的长短组合 PnL / Max Drawdown 与纯多头 PnL / Max Drawdown 双图。',
+    tags: ['Combo Lab', 'PnL', 'Drawdown', 'UX'],
+    bullets: [
+      'rolling_model_lab 增加 long-only 权重、daily long PnL、long-only cumulative / drawdown / fee / gross 曲线。',
+      'AutoAlphaPage 新增双轴 PnL + Max DD 图，上方展示 long-short，下方展示 pure long-only。',
+      '恢复原始预测序列口径，不再用 2024 realized resp 的均值方差对预测做视觉对齐，避免把预测方向解释混淆。',
+      'Combo 卡片和 OOS 区块继续保留 Score、IC、IR、TVR、Train/Val/OOS 对比与泄漏说明。',
+    ],
+  },
+  {
+    timestamp: '2026-04-26T12:30:00+08:00',
+    title: 'Transformer 专项优化与高分时序模型落地',
+    summary: '围绕全因子时序预测实现并迭代 FactorToken / CausalDecay Transformer 系列，在不使用 2024 OOS label 反向调参的约束下刷新最佳模型。',
+    tags: ['Transformer', 'ML/DL', 'OOS', 'Research'],
+    bullets: [
+      '新增 FactorTokenTransformerRidgeStackModel：把因子视为 token，经 Transformer 编码后再用 Ridge stack 稳定输出。',
+      '新增 CausalDecayFactorTransformerStackModel：显式强调因果时间窗口、近期衰减、截面归一化和多头结构融合。',
+      '最新 full-factor 最佳模型为 CausalDecayFactorTransformerStackModel：2024 OOS Score 9100.15、IC 12.84、IR 50.79、TVR 136.77。',
+      '训练/验证/测试仍按 2022-2023 train、2023 尾部 validation、2024 OOS test 切分；2024 只用于最终报告。',
+    ],
+  },
+  {
+    timestamp: '2026-04-25T23:30:00+08:00',
+    title: '探索性 OOS Combo Lab 补全模型、TVR 与卡片体系',
+    summary: '把原先不完整的 OOS Combo Lab 扩展为全因子与低相关因子的完整多方法实验区，新增 TVR、方法卡、Train/Val/OOS 对比和低相关代表性分析。',
+    tags: ['OOS Combo Lab', 'TVR', 'Frontend', 'Experiment'],
+    bullets: [
+      '补齐全因子与低相关 8 因子组合的经典 Rank、Linear、Ridge、Tree、LightGBM、MLP、Transformer 等方法输出。',
+      '所有 Combo 方案统一计算 TVR，并在摘要、卡片、方法对比和 OOS 指标中展示。',
+      '点击方法可打开 Combo Card，查看方法语言描述、泄漏防护说明、Train/Val 曲线以及 Train/Val/OOS 指标对比。',
+      'OOS Combo Lab 改名为 Exploratory OOS Combo Lab，并扩展为整行布局，增加 full-factor vs low-corr trend representativeness 对比。',
+    ],
+  },
+  {
+    timestamp: '2026-04-25T12:00:00+08:00',
+    title: 'v2 独立迁移与 display-only 展示目录',
+    summary: '从 /Volumes/T7/Scientech/autoalpha_v2 迁移出独立项目目录，并整理出不含原始 parquet 的展示专用目录用于 autoalpha.cn/v2。',
+    tags: ['Migration', 'Display', 'Deployment', 'Data Boundary'],
+    bullets: [
+      '建立 /Volumes/T7/autoalpha_v2，迁移代码、计算结果和展示所需数据，消除对 /Volumes/T7/Scientech 下文件的运行依赖。',
+      '建立 /Volumes/T7/autoalpha_v2_display，保留前端展示、压缩 JSON、静态资源和必要 submit/metadata 结果，不包含原始 parquet 数据集。',
+      '优化 server compact API，限制大曲线点数并压缩 dashboard payload，降低公开展示页加载压力。',
+      '将 https://autoalpha.cn/v2 指向展示目录服务，后续计算目录与展示目录通过同步流程解耦。',
+    ],
+  },
+  {
     timestamp: '2026-04-24T23:30:00+08:00',
     title: 'Model Lab 整体因子输出卡片精简 + 相关性图直接可见',
     summary: '简化 Cell 4 只展示唯一 pq 文件（最佳模型），IC/IR/Score 使用 evaluate_submission_like 口径；pq 输出 vs 入模因子相关性图直接显示在卡片内（无需打开 Modal）；后端在 pq 导出后从实际 pq 文件重算输入因子相关性；EnsembleModal 因子贡献权重加小字说明。',
