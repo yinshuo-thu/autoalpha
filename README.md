@@ -106,7 +106,7 @@ Score 209.28 | IC 1.1478 | IR 4.2562 | TVR 266.75
 
 Research interpretation: a short-horizon continuation signal that requires positive 4-bar price movement, recent range location near the high, and participation expansion confirmed by both volume and trade count. The outer decay is used to reduce turnover while preserving intraday persistence.
 
-## Latest OOS Combo Snapshot
+## Latest OOS Combo And Fusion Snapshot
 
 The latest computed combo labs use chronological splits:
 
@@ -115,12 +115,28 @@ The latest computed combo labs use chronological splits:
 - Mock OOS test: `2024-01-02` to `2024-12-31`
 - No 2024 labels are used for fitting weights, model parameters, method selection, or validation.
 
-| Lab | Best model | Factor set | 2024 OOS Score | IC | IR | TVR |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Full factor combo | `RidgeZScoreMetaModel` | 96 | 8659.93 | 12.12 | 51.61 | 136.08 |
-| Low-correlation combo | `LightGBMMetaModel` | 8 | 4399.31 | 7.91 | 31.48 | 136.28 |
+| Lab | Best model | Factor set | 2024 OOS Score | IC | IR | TVR | Long-short PnL | Long-only PnL |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full factor combo | `CausalDecayFactorTransformerStackModel` | 96 | 9100.15 | 12.84 | 50.79 | 136.77 | 2.8479 | 0.5998 |
+| Low-correlation combo | `LightGBMMetaModel` | 8 | 4399.31 | 7.91 | 31.48 | 136.28 | 1.9457 | 0.4306 |
 
-The combo dashboard includes method cards, leakage guards, Train/Val/OOS metric comparison, TVR curves, feature contribution, factor correlation views, and OOS time-series comparison.
+The leading model is a leakage-guarded factor Transformer stack. It trains only on the visible 2022-2023 block and uses 2024 strictly as OOS evaluation. The frontend now reports OOS PnL diagnostics instead of plotting misleading top-bottom prediction spreads:
+
+- long-short cumulative PnL with Max DD on a secondary axis;
+- pure long-only cumulative PnL with Max DD on a secondary axis;
+- method cards with Train/Val/OOS metrics, method descriptions, TVR, and leakage notes;
+- full-factor versus low-correlation factor-basket comparison.
+
+The Model Fusion Lab compares frozen model outputs before blending. The latest fusion panel includes a `25 x 25` output-correlation heatmap covering linear models, ML/DL models, and rank-combo methods. The heatmap uses `|corr|` coloring with blue at `0`, red at `1`, and continuous interpolation in between.
+
+| Fusion candidate | 2024 OOS Score | IC | IR | TVR |
+| --- | ---: | ---: | ---: | ---: |
+| `FusionValSoftmaxBlend` | 8261.93 | 12.36 | 45.18 | 136.42 |
+| `FusionValInverseCorrBlend` | 8078.15 | 12.20 | 44.32 | 135.91 |
+| `FusionGreedyValDiversityBlend` | 8568.76 | 12.58 | 46.91 | 136.50 |
+| `FusionTransformerAnchorValStack` | 8561.49 | 12.56 | 47.01 | 136.48 |
+
+Fusion weights are selected from Train/Val metrics and frozen output correlations before reading 2024 response labels. The current best single model remains `CausalDecayFactorTransformerStackModel`, while the best fusion diagnostic is `FusionGreedyValDiversityBlend`.
 
 ## What Is Included
 
@@ -132,6 +148,9 @@ The combo dashboard includes method cards, leakage guards, Train/Val/OOS metric 
 - Rolling model lab and exploratory OOS combo lab.
 - Full-factor and low-correlation combo comparisons on 2024 mock OOS data.
 - ML benchmarks over raw/rank/z-score factor features: Ridge, RandomForest, ExtraTrees, HistGradientBoosting, LightGBM, and MLP.
+- DL/sequence benchmarks including factor-token Transformer and causal-decay factor Transformer stack models.
+- Model Fusion Lab with stacking/blending candidates and a 25-model output-correlation heatmap.
+- OOS long-short and long-only PnL / Max DD diagnostics.
 - React + Recharts frontend for mining progress, factor records, inspirations, RAG roadmap, and combo cards.
 - Display-only Flask server for compact, public-safe JSON snapshots and static assets.
 

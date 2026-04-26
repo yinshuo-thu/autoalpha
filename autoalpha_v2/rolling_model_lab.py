@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -60,6 +61,48 @@ COMBO_MODEL_NAMES = {
     "VolBalancedTopRankCombo",
     "ClusterNeutralICRankCombo",
 }
+TEMPORAL_TORCH_MODEL_NAMES = {
+    "TorchTCNMetaModel",
+    "TorchGRUMetaModel",
+    "TorchTransformerMetaModel",
+}
+TEMPORAL_TABULAR_MODEL_NAMES = {
+    "TemporalRidgeLagMetaModel",
+    "TemporalLightGBMLagMetaModel",
+    "TemporalHistGBLagMetaModel",
+    "TemporalExtraTreesLagMetaModel",
+}
+FACTOR_TRANSFORMER_MODEL_NAMES = {
+    "FactorTokenTransformerRidgeStackModel",
+    "CausalDecayFactorTransformerStackModel",
+}
+MODEL_LAB_REFERENCES = [
+    {
+        "title": "DeepLOB: Deep Convolutional Neural Networks for Limit Order Books",
+        "url": "https://arxiv.org/abs/1808.03668",
+        "implementation_note": "Use convolution over recent market-state sequences to learn short-horizon nonlinear temporal patterns.",
+    },
+    {
+        "title": "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting",
+        "url": "https://arxiv.org/abs/1912.09363",
+        "implementation_note": "Use attention over visible historical states without allowing evaluation-period labels into training.",
+    },
+    {
+        "title": "TabTransformer: Tabular Data Modeling Using Contextual Embeddings",
+        "url": "https://arxiv.org/abs/2012.06678",
+        "implementation_note": "Motivates factor-token contextualization before a supervised regression head.",
+    },
+    {
+        "title": "TimeFormer: Transformer with attention modulation empowered by temporal characteristics for time series forecasting",
+        "url": "https://doi.org/10.1016/j.eswa.2025.131040",
+        "implementation_note": "Use causal past-only temporal decay as an inductive bias for attention candidate generation.",
+    },
+    {
+        "title": "SCINet: Time Series Modeling and Forecasting with Sample Convolution and Interaction",
+        "url": "https://proceedings.neurips.cc/paper_files/paper/2022/hash/266983d0949aed78a16fa4782237dea7-Paper-Conference.pdf",
+        "implementation_note": "Motivates compact convolutional sequence learners as a stronger alternative to purely tabular models.",
+    },
+]
 LOW_CORR_FACTOR_RUN_IDS = [
     "autoalpha_20260422_223541_02",
     "autoalpha_20260423_122505_01",
@@ -345,6 +388,19 @@ def _signal_to_weights(signal: pd.Series, quantile: float = 0.2) -> pd.Series:
     return weights
 
 
+def _signal_to_long_weights(signal: pd.Series, quantile: float = 0.2) -> pd.Series:
+    valid = signal.replace([np.inf, -np.inf], np.nan).dropna()
+    n = len(valid)
+    if n < 5:
+        return pd.Series(0.0, index=signal.index, dtype="float32")
+    bucket = max(1, int(n * quantile))
+    ordered = valid.sort_values(kind="mergesort")
+    long_index = ordered.index[-bucket:]
+    weights = pd.Series(0.0, index=signal.index, dtype="float32")
+    weights.loc[long_index] = np.float32(1.0 / bucket)
+    return weights
+
+
 def _strategy_from_predictions(pred: pd.Series, resp: pd.Series, *, fee_bps: float = DEFAULT_FEE_BPS) -> Dict[str, Any]:
     frame = pd.DataFrame({"pred": pred, "resp": resp}).replace([np.inf, -np.inf], np.nan).dropna()
     if frame.empty:
@@ -352,9 +408,17 @@ def _strategy_from_predictions(pred: pd.Series, resp: pd.Series, *, fee_bps: flo
             "daily_pnl": pd.Series(dtype="float32"),
             "daily_gross_pnl": pd.Series(dtype="float32"),
             "daily_fee": pd.Series(dtype="float32"),
+            "daily_long_pnl": pd.Series(dtype="float32"),
+            "daily_long_gross_pnl": pd.Series(dtype="float32"),
+            "daily_long_fee": pd.Series(dtype="float32"),
+            "long_drawdown_curve": pd.Series(dtype="float32"),
             "total_pnl": 0.0,
             "gross_pnl": 0.0,
             "total_fee": 0.0,
+            "long_total_pnl": 0.0,
+            "long_gross_pnl": 0.0,
+            "long_total_fee": 0.0,
+            "long_max_drawdown": 0.0,
             "sharpe": 0.0,
             "max_drawdown": 0.0,
             "hit_ratio": 0.0,
@@ -362,28 +426,48 @@ def _strategy_from_predictions(pred: pd.Series, resp: pd.Series, *, fee_bps: flo
         }
 
     frame["weight"] = frame.groupby(level="date")["pred"].transform(_signal_to_weights)
+    frame["long_weight"] = frame.groupby(level="date")["pred"].transform(_signal_to_long_weights)
     frame["gross_pnl"] = frame["weight"] * frame["resp"]
+    frame["long_gross_pnl"] = frame["long_weight"] * frame["resp"]
     daily_gross_pnl = frame.groupby(level="date")["gross_pnl"].sum().astype("float32")
+    daily_long_gross_pnl = frame.groupby(level="date")["long_gross_pnl"].sum().astype("float32")
     daily_weights = frame["weight"].unstack("security_id").fillna(0.0)
+    daily_long_weights = frame["long_weight"].unstack("security_id").fillna(0.0)
     turnover = daily_weights.diff().abs().sum(axis=1) / 2.0
+    long_turnover = daily_long_weights.diff().abs().sum(axis=1) / 2.0
     if len(turnover):
         turnover.iloc[0] = daily_weights.iloc[0].abs().sum() / 2.0
+    if len(long_turnover):
+        long_turnover.iloc[0] = daily_long_weights.iloc[0].abs().sum() / 2.0
     fee_rate = max(float(fee_bps), 0.0) / 10_000.0
     daily_fee = (turnover.reindex(daily_gross_pnl.index).fillna(0.0) * fee_rate).astype("float32")
+    daily_long_fee = (long_turnover.reindex(daily_long_gross_pnl.index).fillna(0.0) * fee_rate).astype("float32")
     daily_pnl = (daily_gross_pnl - daily_fee).astype("float32")
+    daily_long_pnl = (daily_long_gross_pnl - daily_long_fee).astype("float32")
     cum_pnl = daily_pnl.cumsum()
+    long_cum_pnl = daily_long_pnl.cumsum()
     running_max = cum_pnl.cummax()
+    long_running_max = long_cum_pnl.cummax()
     drawdown = cum_pnl - running_max
+    long_drawdown = long_cum_pnl - long_running_max
     pnl_std = daily_pnl.std()
     sharpe = float(daily_pnl.mean() / pnl_std * np.sqrt(252)) if pnl_std and pnl_std > 0 else 0.0
     return {
         "daily_pnl": daily_pnl,
         "daily_gross_pnl": daily_gross_pnl,
         "daily_fee": daily_fee,
+        "daily_long_pnl": daily_long_pnl,
+        "daily_long_gross_pnl": daily_long_gross_pnl,
+        "daily_long_fee": daily_long_fee,
         "drawdown_curve": drawdown.astype("float32"),
+        "long_drawdown_curve": long_drawdown.astype("float32"),
         "total_pnl": float(cum_pnl.iloc[-1]) if len(cum_pnl) else 0.0,
         "gross_pnl": float(daily_gross_pnl.cumsum().iloc[-1]) if len(daily_gross_pnl) else 0.0,
         "total_fee": float(daily_fee.sum()) if len(daily_fee) else 0.0,
+        "long_total_pnl": float(long_cum_pnl.iloc[-1]) if len(long_cum_pnl) else 0.0,
+        "long_gross_pnl": float(daily_long_gross_pnl.cumsum().iloc[-1]) if len(daily_long_gross_pnl) else 0.0,
+        "long_total_fee": float(daily_long_fee.sum()) if len(daily_long_fee) else 0.0,
+        "long_max_drawdown": float(long_drawdown.min()) if len(long_drawdown) else 0.0,
         "sharpe": sharpe,
         "max_drawdown": float(drawdown.min()) if len(drawdown) else 0.0,
         "hit_ratio": float((daily_pnl > 0).mean()) if len(daily_pnl) else 0.0,
@@ -404,16 +488,25 @@ def _prediction_comparison_curve(pred: pd.Series, resp: pd.Series) -> List[Dict[
                 "mean_return": 0.0,
                 "predicted_spread": 0.0,
                 "realized_spread": 0.0,
+                "daily_ic": 0.0,
+                "daily_rank_ic": 0.0,
+                "daily_pnl": 0.0,
             })
         q = max(1, int(n * 0.2))
         ordered = group.sort_values("pred")
         bottom = ordered.iloc[:q]
         top = ordered.iloc[-q:]
+        daily_ic = _daily_corr(group)
+        daily_rank_ic = _daily_corr(group, rank=True)
+        weights = _signal_to_weights(group["pred"])
         return pd.Series({
             "mean_prediction": float(group["pred"].mean()),
             "mean_return": float(group["resp"].mean()),
             "predicted_spread": float(top["pred"].mean() - bottom["pred"].mean()),
             "realized_spread": float(top["resp"].mean() - bottom["resp"].mean()),
+            "daily_ic": float(daily_ic) if np.isfinite(daily_ic) else 0.0,
+            "daily_rank_ic": float(daily_rank_ic) if np.isfinite(daily_rank_ic) else 0.0,
+            "daily_pnl": float((weights * group["resp"]).sum()),
         })
 
     daily = frame.groupby(level="date", sort=True).apply(_daily_row)
@@ -430,6 +523,9 @@ def _prediction_comparison_curve(pred: pd.Series, resp: pd.Series) -> List[Dict[
             "predicted_spread": float(row["predicted_spread"]),
             "realized_spread": float(row["realized_spread"]),
             "predicted_spread_aligned": float(row["predicted_spread_aligned"]),
+            "daily_ic": float(row.get("daily_ic", 0.0)),
+            "daily_rank_ic": float(row.get("daily_rank_ic", 0.0)),
+            "daily_pnl": float(row.get("daily_pnl", 0.0)),
         }
         for idx, row in daily.iterrows()
         if np.isfinite(row).all()
@@ -980,6 +1076,51 @@ def _combo_method_card(model_name: str) -> Dict[str, Any]:
             "weight_rule": "Two-hidden-layer Torch MLP over raw, rank, z-score and short-memory factor states; predictions are normalized cross-sectionally before export.",
             "validation_usage": "Validation is report-only; all fitted weights are learned from visible Train rows without 2024 labels.",
         },
+        "TorchTCNMetaModel": {
+            "description": "Temporal convolutional neural meta-model over each stock's recent factor-state sequence, inspired by DeepLOB-style CNN sequence modeling.",
+            "weight_rule": "Conv1d blocks consume current and past rank/z-score factor states; training uses visible 2022-2023 rows only.",
+            "validation_usage": "Validation is report-only; 2024 labels are never used for network weights or hyperparameter choice.",
+        },
+        "TemporalRidgeLagMetaModel": {
+            "description": "Leakage-safe temporal ridge model over current and lagged per-stock factor rank/z-score states.",
+            "weight_rule": "Builds an 8-day lag tensor from raw-bar-derived factors, flattens it, then fits ridge regression on 2022-2023 labels only.",
+            "validation_usage": "Validation is report-only; temporal lags use current/past factor values only.",
+        },
+        "TemporalLightGBMLagMetaModel": {
+            "description": "Gradient-boosted temporal interaction model over lagged factor states, a robust tree alternative to sequence neural nets.",
+            "weight_rule": "LightGBM learns nonlinear cross-lag and cross-factor interactions from train-period lagged rank/z-score features.",
+            "validation_usage": "Validation is report-only; 2024 OOS is held out entirely.",
+        },
+        "TemporalHistGBLagMetaModel": {
+            "description": "Histogram gradient boosting over compact temporal factor states for additive nonlinear lag effects.",
+            "weight_rule": "Fits regularized histogram boosting on the visible 2022-2023 temporal feature matrix.",
+            "validation_usage": "Validation is report-only; no OOS response is used.",
+        },
+        "TemporalExtraTreesLagMetaModel": {
+            "description": "Randomized tree ensemble over lagged factor states to stress-test nonlinear temporal interactions.",
+            "weight_rule": "ExtraTrees on sampled temporal lag features with shallow depth and large leaves to limit overfit.",
+            "validation_usage": "Validation is report-only; final 2024 prediction is a pure forward application.",
+        },
+        "FactorTokenTransformerRidgeStackModel": {
+            "description": "Full-factor Transformer-style attention stacker: each factor is a token with current and lagged rank/z-score states, then a learned query attends across all factor tokens.",
+            "weight_rule": "A Ridge baseline and a factor-token multi-head attention model are fit on train-only data; the blend weight is selected on the visible 2022-2023 validation block.",
+            "validation_usage": "Only the last visible training block is used to select the Ridge/Transformer blend. 2024 OOS is never used for architecture, blend, or weight fitting.",
+        },
+        "CausalDecayFactorTransformerStackModel": {
+            "description": "Leakage-safe factor-token Transformer stack with train-only sign alignment, causal decay attention candidates, and validation-selected residual blending.",
+            "weight_rule": "Fits attention, Ridge, LightGBM and train-IC rank heads on the fit block; only the visible validation block chooses the attention temperature/head count and convex blend.",
+            "validation_usage": "Validation is the only optimization signal. 2024 OOS labels are excluded from all architecture, blend, and weight decisions.",
+        },
+        "TorchGRUMetaModel": {
+            "description": "Recurrent neural meta-model that learns nonlinear state transitions in per-stock factor histories.",
+            "weight_rule": "GRU encoder over lagged rank/z-score factor states followed by a regularized regression head.",
+            "validation_usage": "Validation is report-only; final OOS prediction is generated after fitting only on 2022-2023 rows.",
+        },
+        "TorchTransformerMetaModel": {
+            "description": "Compact Transformer encoder over recent factor histories to capture cross-lag interactions that tabular models miss.",
+            "weight_rule": "Self-attention over current and past rank/z-score states with a small feed-forward head and weight decay.",
+            "validation_usage": "Validation is report-only; no 2024 response information is used for attention weights.",
+        },
     }
     base = cards.get(model_name, {})
     return {
@@ -1099,6 +1240,15 @@ def _fit_with_optional_weights(model: Any, X: np.ndarray, y: np.ndarray, sample_
         model.fit(X, y)
 
 
+def _resolve_torch_device(torch: Any) -> Any:
+    requested = (os.environ.get("AUTOALPHA_TORCH_DEVICE") or "cpu").strip().lower()
+    if requested == "mps" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    if requested == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 class TorchMPSMLPRegressor:
     def __init__(
         self,
@@ -1133,7 +1283,7 @@ class TorchMPSMLPRegressor:
         else:
             w_arr = np.asarray(sample_weight, dtype=np.float32).reshape(-1, 1)
         self.n_features_in_ = int(X_arr.shape[1])
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        device = _resolve_torch_device(torch)
         self.device_ = str(device)
         torch.manual_seed(self.random_state)
         layers: List[Any] = []
@@ -1176,6 +1326,929 @@ class TorchMPSMLPRegressor:
                 xb = torch.as_tensor(X_arr[start : start + self.batch_size], dtype=torch.float32, device=device)
                 preds.append(self.model_(xb).detach().cpu().numpy().reshape(-1).astype("float32"))
         return np.concatenate(preds) if preds else np.array([], dtype="float32")
+
+
+class TorchTemporalSequenceRegressor:
+    def __init__(
+        self,
+        *,
+        architecture: str,
+        seq_len: int,
+        n_channels: int,
+        hidden_size: int = 64,
+        epochs: int = 8,
+        batch_size: int = 4096,
+        lr: float = 7e-4,
+        weight_decay: float = 2e-4,
+        random_state: int = 42,
+    ) -> None:
+        self.architecture = architecture
+        self.seq_len = int(seq_len)
+        self.n_channels = int(n_channels)
+        self.hidden_size = int(hidden_size)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.lr = float(lr)
+        self.weight_decay = float(weight_decay)
+        self.random_state = int(random_state)
+        self.model_: Any = None
+        self.device_: str = "cpu"
+        self.n_features_in_: int = self.seq_len * self.n_channels
+
+    def _build_model(self, nn: Any) -> Any:
+        architecture = self.architecture
+        seq_len = self.seq_len
+        n_channels = self.n_channels
+        hidden = self.hidden_size
+
+        class TemporalNet(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.architecture = architecture
+                if architecture == "tcn":
+                    self.encoder = nn.Sequential(
+                        nn.Conv1d(n_channels, hidden, kernel_size=3, padding=1),
+                        nn.SiLU(),
+                        nn.Dropout(0.05),
+                        nn.Conv1d(hidden, hidden, kernel_size=3, padding=2, dilation=2),
+                        nn.SiLU(),
+                        nn.AdaptiveAvgPool1d(1),
+                    )
+                    self.head = nn.Sequential(nn.Flatten(), nn.Linear(hidden, 32), nn.SiLU(), nn.Linear(32, 1))
+                elif architecture == "gru":
+                    self.encoder = nn.GRU(input_size=n_channels, hidden_size=hidden, batch_first=True)
+                    self.head = nn.Sequential(nn.Linear(hidden, 32), nn.SiLU(), nn.Linear(32, 1))
+                elif architecture == "transformer":
+                    d_model = max(32, hidden)
+                    n_heads = 4 if d_model % 4 == 0 else 2
+                    self.proj = nn.Linear(n_channels, d_model)
+                    self.pos = nn.Parameter(nn.init.normal_(nn.Parameter(nn.empty(seq_len, d_model)), std=0.02))
+                    layer = nn.TransformerEncoderLayer(
+                        d_model=d_model,
+                        nhead=n_heads,
+                        dim_feedforward=d_model * 2,
+                        dropout=0.05,
+                        activation="gelu",
+                        batch_first=True,
+                        norm_first=True,
+                    )
+                    self.encoder = nn.TransformerEncoder(layer, num_layers=2)
+                    self.head = nn.Sequential(nn.Linear(d_model, 32), nn.SiLU(), nn.Linear(32, 1))
+                else:
+                    raise ValueError(f"Unknown temporal architecture: {architecture}")
+
+            def forward(self, x: Any) -> Any:
+                x = x.reshape(-1, seq_len, n_channels)
+                x = torch.flip(x, dims=[1])
+                if self.architecture == "tcn":
+                    encoded = self.encoder(x.transpose(1, 2))
+                    return self.head(encoded)
+                if self.architecture == "gru":
+                    _out, hidden_state = self.encoder(x)
+                    return self.head(hidden_state[-1])
+                x = self.proj(x) + self.pos.unsqueeze(0)
+                encoded = self.encoder(x)
+                return self.head(encoded[:, -1, :])
+
+        import torch
+
+        return TemporalNet()
+
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "TorchTemporalSequenceRegressor":
+        import torch
+        from torch import nn
+
+        X_arr = np.asarray(X, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+        if X_arr.ndim != 2 or len(X_arr) == 0:
+            raise ValueError("TorchTemporalSequenceRegressor expects a non-empty 2D matrix.")
+        if int(X_arr.shape[1]) != self.n_features_in_:
+            raise ValueError(f"Expected {self.n_features_in_} temporal features, got {X_arr.shape[1]}.")
+        if sample_weight is None:
+            w_arr = np.ones((len(y_arr), 1), dtype=np.float32)
+        else:
+            w_arr = np.asarray(sample_weight, dtype=np.float32).reshape(-1, 1)
+
+        device = _resolve_torch_device(torch)
+        self.device_ = str(device)
+        torch.manual_seed(self.random_state)
+        model = self._build_model(nn).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        rng = np.random.default_rng(self.random_state)
+        n_rows = len(X_arr)
+        model.train()
+        for _epoch in range(max(1, self.epochs)):
+            order = rng.permutation(n_rows)
+            for start in range(0, n_rows, self.batch_size):
+                idx = order[start : start + self.batch_size]
+                xb = torch.as_tensor(X_arr[idx], dtype=torch.float32, device=device)
+                yb = torch.as_tensor(y_arr[idx], dtype=torch.float32, device=device)
+                wb = torch.as_tensor(w_arr[idx], dtype=torch.float32, device=device)
+                optimizer.zero_grad(set_to_none=True)
+                loss = (((model(xb) - yb) ** 2) * wb).mean()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+        self.model_ = model.eval()
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        import torch
+
+        if self.model_ is None:
+            raise RuntimeError("TorchTemporalSequenceRegressor is not fitted.")
+        X_arr = np.asarray(X, dtype=np.float32)
+        if X_arr.ndim != 2 or int(X_arr.shape[1]) != self.n_features_in_:
+            raise ValueError("Prediction matrix has incompatible temporal shape.")
+        device = torch.device(self.device_)
+        preds: List[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(X_arr), self.batch_size):
+                xb = torch.as_tensor(X_arr[start : start + self.batch_size], dtype=torch.float32, device=device)
+                preds.append(self.model_(xb).detach().cpu().numpy().reshape(-1).astype("float32"))
+        return np.concatenate(preds) if preds else np.array([], dtype="float32")
+
+
+class TorchFactorTokenTransformerRegressor:
+    def __init__(
+        self,
+        *,
+        n_factors: int,
+        n_channels: int,
+        d_model: int = 32,
+        n_heads: int = 4,
+        epochs: int = 5,
+        batch_size: int = 1024,
+        lr: float = 7e-4,
+        weight_decay: float = 3e-4,
+        random_state: int = 42,
+    ) -> None:
+        self.n_factors = int(n_factors)
+        self.n_channels = int(n_channels)
+        self.d_model = int(d_model)
+        self.n_heads = int(n_heads)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.lr = float(lr)
+        self.weight_decay = float(weight_decay)
+        self.random_state = int(random_state)
+        self.model_: Any = None
+        self.device_: str = "cpu"
+        self.n_features_in_ = self.n_factors * self.n_channels
+
+    def _build_model(self, nn: Any) -> Any:
+        n_factors = self.n_factors
+        n_channels = self.n_channels
+        d_model = self.d_model
+        n_heads = self.n_heads
+
+        class FactorTokenAttentionNet(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.proj = nn.Linear(n_channels, d_model)
+                self.factor_embed = nn.Parameter(torch.zeros(n_factors, d_model))
+                self.query = nn.Parameter(torch.zeros(1, 1, d_model))
+                self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=0.05, batch_first=True)
+                self.norm = nn.LayerNorm(d_model)
+                self.head = nn.Sequential(
+                    nn.Linear(d_model, d_model),
+                    nn.GELU(),
+                    nn.Dropout(0.05),
+                    nn.Linear(d_model, 1),
+                )
+                nn.init.normal_(self.factor_embed, std=0.02)
+                nn.init.normal_(self.query, std=0.02)
+
+            def forward(self, x: Any) -> Any:
+                x = x.reshape(-1, n_factors, n_channels)
+                tokens = self.proj(x) + self.factor_embed.unsqueeze(0)
+                query = self.query.expand(tokens.shape[0], -1, -1)
+                pooled, _weights = self.attn(query, tokens, tokens, need_weights=False)
+                pooled = self.norm(pooled.squeeze(1))
+                return self.head(pooled)
+
+        import torch
+
+        return FactorTokenAttentionNet()
+
+    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "TorchFactorTokenTransformerRegressor":
+        import torch
+        from torch import nn
+
+        X_arr = np.asarray(X, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+        if X_arr.ndim != 2 or len(X_arr) == 0:
+            raise ValueError("TorchFactorTokenTransformerRegressor expects a non-empty 2D matrix.")
+        if int(X_arr.shape[1]) != self.n_features_in_:
+            raise ValueError(f"Expected {self.n_features_in_} factor-token features, got {X_arr.shape[1]}.")
+        if sample_weight is None:
+            w_arr = np.ones((len(y_arr), 1), dtype=np.float32)
+        else:
+            w_arr = np.asarray(sample_weight, dtype=np.float32).reshape(-1, 1)
+
+        device = _resolve_torch_device(torch)
+        self.device_ = str(device)
+        torch.manual_seed(self.random_state)
+        torch.set_num_threads(max(1, min(8, os.cpu_count() or 4)))
+        model = self._build_model(nn).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        rng = np.random.default_rng(self.random_state)
+        n_rows = len(X_arr)
+        model.train()
+        for _epoch in range(max(1, self.epochs)):
+            order = rng.permutation(n_rows)
+            for start in range(0, n_rows, self.batch_size):
+                idx = order[start : start + self.batch_size]
+                xb = torch.as_tensor(X_arr[idx], dtype=torch.float32, device=device)
+                yb = torch.as_tensor(y_arr[idx], dtype=torch.float32, device=device)
+                wb = torch.as_tensor(w_arr[idx], dtype=torch.float32, device=device)
+                optimizer.zero_grad(set_to_none=True)
+                loss = (((model(xb) - yb) ** 2) * wb).mean()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+        self.model_ = model.eval()
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        import torch
+
+        if self.model_ is None:
+            raise RuntimeError("TorchFactorTokenTransformerRegressor is not fitted.")
+        X_arr = np.asarray(X, dtype=np.float32)
+        if X_arr.ndim != 2 or int(X_arr.shape[1]) != self.n_features_in_:
+            raise ValueError("Prediction matrix has incompatible factor-token shape.")
+        device = torch.device(self.device_)
+        preds: List[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(X_arr), self.batch_size * 2):
+                xb = torch.as_tensor(X_arr[start : start + self.batch_size * 2], dtype=torch.float32, device=device)
+                preds.append(self.model_(xb).detach().cpu().numpy().reshape(-1).astype("float32"))
+        return np.concatenate(preds) if preds else np.array([], dtype="float32")
+
+
+def _factor_token_matrix_from_model_frame(
+    model_frame: pd.DataFrame,
+    feature_cols: List[str],
+    positions: np.ndarray,
+) -> np.ndarray:
+    n_rows = len(positions)
+    n_factors = len(feature_cols)
+    n_channels = 6
+    out = np.zeros((n_rows, n_factors, n_channels), dtype="float32")
+    columns = set(model_frame.columns)
+    chunk_frame = model_frame.iloc[positions]
+    for factor_i, col in enumerate(feature_cols):
+        names = [
+            col,
+            f"{col}__csz",
+            f"{col}__rank",
+            f"{col}__lag1",
+            f"{col}__diff1",
+            f"{col}__mom2",
+        ]
+        for channel_i, name in enumerate(names):
+            if name in columns:
+                out[:, factor_i, channel_i] = chunk_frame[name].to_numpy(dtype="float32", copy=False)
+    return out.reshape(n_rows, n_factors * n_channels)
+
+
+def _fit_ridge_baseline_on_model_frame(
+    *,
+    model_frame: pd.DataFrame,
+    y_train: pd.Series,
+    train_mask: pd.Series,
+    predict_mask: pd.Series,
+    max_rows: int = 250_000,
+) -> tuple[np.ndarray, Any]:
+    model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=2.0, random_state=42))
+    y_train_model = _make_training_target(y_train)
+    y_train_np = y_train_model.to_numpy(dtype="float32", copy=False)
+    train_weights = _make_training_weights(y_train_model)
+    train_positions = np.flatnonzero(np.asarray(train_mask, dtype=bool))
+    if len(train_positions) > max_rows:
+        rng = np.random.default_rng(42)
+        local_sample_idx = rng.choice(len(train_positions), size=max_rows, replace=False)
+    else:
+        local_sample_idx = np.arange(len(train_positions))
+    sampled_positions = train_positions[local_sample_idx]
+    X_fit = model_frame.iloc[sampled_positions].to_numpy(dtype="float32", copy=False)
+    y_fit = y_train_np[local_sample_idx]
+    w_fit = train_weights[local_sample_idx] if train_weights is not None else np.ones(len(y_fit), dtype="float32")
+    _fit_with_optional_weights(model, X_fit, y_fit, w_fit)
+    predict_positions = np.flatnonzero(np.asarray(predict_mask, dtype=bool))
+    pred_parts: List[np.ndarray] = []
+    for start in range(0, len(predict_positions), 100_000):
+        chunk_positions = predict_positions[start : start + 100_000]
+        pred_parts.append(
+            np.asarray(
+                model.predict(model_frame.iloc[chunk_positions].to_numpy(dtype="float32", copy=False)),
+                dtype="float32",
+            )
+        )
+    pred = np.concatenate(pred_parts).astype("float32") if pred_parts else np.array([], dtype="float32")
+    return pred, model
+
+
+def _fit_predict_factor_token_transformer_stack(
+    *,
+    feature_cols: List[str],
+    frame: pd.DataFrame,
+    model_frame: pd.DataFrame,
+    train_mask: pd.Series,
+    predict_mask: pd.Series,
+) -> Dict[str, Any]:
+    train_days = sorted(pd.Index(frame.loc[train_mask].index.get_level_values("date").astype(str)).unique().tolist())
+    fit_days, val_days = _split_train_val_days(train_days)
+    fit_mask = frame.index.get_level_values("date").isin(fit_days)
+    val_mask = frame.index.get_level_values("date").isin(val_days)
+
+    def factor_token_state(positions: np.ndarray) -> np.ndarray:
+        n_rows = len(positions)
+        state = np.zeros((n_rows, len(feature_cols), 6), dtype="float32")
+        chunk_frame = model_frame.iloc[positions]
+        columns = set(model_frame.columns)
+        for factor_i, col in enumerate(feature_cols):
+            for channel_i, name in enumerate((col, f"{col}__csz", f"{col}__rank", f"{col}__lag1", f"{col}__diff1", f"{col}__mom2")):
+                if name in columns:
+                    state[:, factor_i, channel_i] = chunk_frame[name].to_numpy(dtype="float32", copy=False)
+        return state
+
+    def attention_features(state: np.ndarray, *, seed: int, heads: int, temperature: float) -> np.ndarray:
+        state = np.asarray(state, dtype="float32")
+        raw = state.reshape(state.shape[0], state.shape[1] * state.shape[2])
+        rng = np.random.default_rng(seed)
+        queries = rng.normal(0.0, 1.0, size=(heads, state.shape[1], state.shape[2])).astype("float32")
+        pooled: List[np.ndarray] = []
+        scale = max(float(temperature), 1e-6)
+        for h in range(heads):
+            scores = np.clip((state * queries[h][None, :, :]).sum(axis=2) / scale, -8.0, 8.0)
+            scores = scores - scores.max(axis=1, keepdims=True)
+            weights = np.exp(scores).astype("float32")
+            weights_sum = weights.sum(axis=1, keepdims=True)
+            weights = weights / np.maximum(weights_sum, 1e-6)
+            pooled.append((weights[:, :, None] * state).sum(axis=1))
+            pooled.append((weights[:, :, None] * np.abs(state)).sum(axis=1))
+        return np.concatenate([raw] + pooled, axis=1).astype("float32")
+
+    def fit_attention_ridge(
+        local_train_mask: pd.Series,
+        local_predict_mask: pd.Series,
+        *,
+        seed: int,
+        heads: int,
+        temperature: float,
+        alpha: float,
+    ) -> np.ndarray:
+        y_local = frame.loc[local_train_mask, "resp"].astype("float32")
+        y_target = _make_training_target(y_local)
+        y_np = y_target.to_numpy(dtype="float32", copy=False)
+        weights = _make_training_weights(y_target)
+        train_positions = np.flatnonzero(np.asarray(local_train_mask, dtype=bool))
+        max_rows = 320_000
+        if len(train_positions) > max_rows:
+            rng = np.random.default_rng(seed)
+            local_sample_idx = rng.choice(len(train_positions), size=max_rows, replace=False)
+        else:
+            local_sample_idx = np.arange(len(train_positions))
+        sampled_positions = train_positions[local_sample_idx]
+        X_fit = attention_features(factor_token_state(sampled_positions), seed=seed, heads=heads, temperature=temperature)
+        y_fit = y_np[local_sample_idx]
+        w_fit = weights[local_sample_idx] if weights is not None else np.ones(len(y_fit), dtype="float32")
+        model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=alpha, random_state=seed))
+        _fit_with_optional_weights(model, X_fit, y_fit, w_fit)
+        predict_positions = np.flatnonzero(np.asarray(local_predict_mask, dtype=bool))
+        pred_parts: List[np.ndarray] = []
+        for start in range(0, len(predict_positions), 120_000):
+            chunk_positions = predict_positions[start : start + 120_000]
+            X_chunk = attention_features(factor_token_state(chunk_positions), seed=seed, heads=heads, temperature=temperature)
+            pred_parts.append(np.asarray(model.predict(X_chunk), dtype="float32"))
+        return np.concatenate(pred_parts).astype("float32") if pred_parts else np.array([], dtype="float32")
+
+    if val_mask.any() and fit_mask.any():
+        val_resp = frame.loc[val_mask, "resp"].astype("float32")
+        best_config = {"seed": 42, "heads": 24, "temperature": 0.9, "alpha": 2.0}
+        best_score = -1e18
+        for config in [
+            {"seed": 42, "heads": 16, "temperature": 0.7, "alpha": 1.5},
+            {"seed": 43, "heads": 24, "temperature": 0.9, "alpha": 2.0},
+            {"seed": 44, "heads": 32, "temperature": 1.2, "alpha": 3.0},
+        ]:
+            pred_val = fit_attention_ridge(fit_mask, val_mask, **config)
+            candidate = pd.Series(pred_val, index=val_resp.index, dtype="float32")
+            metrics = _combo_period_metrics(candidate, val_resp, fee_bps=DEFAULT_FEE_BPS)
+            score = float(metrics.get("Score", 0.0))
+            if score > best_score:
+                best_score = score
+                best_config = config
+    else:
+        best_config = {"seed": 42, "heads": 24, "temperature": 0.9, "alpha": 2.0}
+
+    pred = fit_attention_ridge(train_mask, predict_mask, **best_config)
+    folded_importance = {col: 1.0 for col in feature_cols}
+    return {
+        "pred": pred,
+        "importance": folded_importance,
+        "attention_config": best_config,
+    }
+
+
+def _fit_predict_causal_decay_factor_transformer_stack(
+    *,
+    feature_cols: List[str],
+    frame: pd.DataFrame,
+    model_frame: pd.DataFrame,
+    train_mask: pd.Series,
+    predict_mask: pd.Series,
+) -> Dict[str, Any]:
+    train_days = sorted(pd.Index(frame.loc[train_mask].index.get_level_values("date").astype(str)).unique().tolist())
+    fit_days, val_days = _split_train_val_days(train_days)
+    fit_mask = frame.index.get_level_values("date").isin(fit_days)
+    val_mask = frame.index.get_level_values("date").isin(val_days)
+    if not fit_mask.any() or not val_mask.any():
+        return _fit_predict_factor_token_transformer_stack(
+            feature_cols=feature_cols,
+            frame=frame,
+            model_frame=model_frame,
+            train_mask=train_mask,
+            predict_mask=predict_mask,
+        )
+
+    fit_resp = frame.loc[fit_mask, "resp"].astype("float32")
+    fit_stats = _compute_factor_daily_ic_stats(
+        frame.loc[fit_mask, feature_cols].astype("float32"),
+        fit_resp,
+        feature_cols,
+    )
+    signs = np.array([float(fit_stats.get(col, {}).get("sign", 1.0) or 1.0) for col in feature_cols], dtype="float32")
+    abs_ic = np.array([float(fit_stats.get(col, {}).get("abs_ic", 0.0) or 0.0) for col in feature_cols], dtype="float32")
+    if float(abs_ic.sum()) <= 0.0:
+        factor_prior = np.full(len(feature_cols), 1.0 / max(1, len(feature_cols)), dtype="float32")
+    else:
+        factor_prior = (abs_ic / max(float(abs_ic.sum()), 1e-8)).astype("float32")
+
+    channel_names = ("raw", "csz", "rank", "lag1", "diff1", "mom2")
+
+    def factor_token_state(positions: np.ndarray, *, align_sign: bool) -> np.ndarray:
+        n_rows = len(positions)
+        state = np.zeros((n_rows, len(feature_cols), len(channel_names)), dtype="float32")
+        chunk_frame = model_frame.iloc[positions]
+        columns = set(model_frame.columns)
+        for factor_i, col in enumerate(feature_cols):
+            for channel_i, name in enumerate((col, f"{col}__csz", f"{col}__rank", f"{col}__lag1", f"{col}__diff1", f"{col}__mom2")):
+                if name in columns:
+                    state[:, factor_i, channel_i] = chunk_frame[name].to_numpy(dtype="float32", copy=False)
+        if align_sign:
+            state *= signs[None, :, None]
+        return state
+
+    def attention_features(
+        state: np.ndarray,
+        *,
+        seed: int,
+        heads: int,
+        temperature: float,
+        decay: float,
+        prior_strength: float,
+    ) -> np.ndarray:
+        state = np.asarray(state, dtype="float32")
+        raw = state.reshape(state.shape[0], state.shape[1] * state.shape[2])
+        rng = np.random.default_rng(seed)
+        queries = rng.normal(0.0, 1.0, size=(heads, state.shape[1], state.shape[2])).astype("float32")
+        decay_vector = np.array([1.0, 1.0, 1.0, decay, decay, decay * decay], dtype="float32")
+        prior_log = np.log(np.maximum(factor_prior, 1e-8)).astype("float32")
+        pooled: List[np.ndarray] = []
+        scale = max(float(temperature), 1e-6)
+        for h in range(heads):
+            q = queries[h] * decay_vector[None, :]
+            scores = np.clip((state * q[None, :, :]).sum(axis=2) / scale, -8.0, 8.0)
+            scores = scores + float(prior_strength) * prior_log[None, :]
+            scores = scores - scores.max(axis=1, keepdims=True)
+            weights = np.exp(scores).astype("float32")
+            weights = weights / np.maximum(weights.sum(axis=1, keepdims=True), 1e-6)
+            pooled.append((weights[:, :, None] * state).sum(axis=1))
+            pooled.append((weights[:, :, None] * np.abs(state)).sum(axis=1))
+            pooled.append((weights * factor_prior[None, :]).sum(axis=1, keepdims=True).astype("float32"))
+        return np.concatenate([raw] + pooled, axis=1).astype("float32")
+
+    def fit_attention_ridge(
+        local_train_mask: pd.Series,
+        local_predict_mask: pd.Series,
+        *,
+        seed: int,
+        heads: int,
+        temperature: float,
+        alpha: float,
+        decay: float,
+        prior_strength: float,
+        align_sign: bool,
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
+        y_local = frame.loc[local_train_mask, "resp"].astype("float32")
+        y_target = _make_training_target(y_local)
+        y_np = y_target.to_numpy(dtype="float32", copy=False)
+        weights = _make_training_weights(y_target)
+        train_positions = np.flatnonzero(np.asarray(local_train_mask, dtype=bool))
+        max_rows = 340_000
+        if len(train_positions) > max_rows:
+            rng = np.random.default_rng(seed)
+            local_sample_idx = rng.choice(len(train_positions), size=max_rows, replace=False)
+        else:
+            local_sample_idx = np.arange(len(train_positions))
+        sampled_positions = train_positions[local_sample_idx]
+        X_fit = attention_features(
+            factor_token_state(sampled_positions, align_sign=align_sign),
+            seed=seed,
+            heads=heads,
+            temperature=temperature,
+            decay=decay,
+            prior_strength=prior_strength,
+        )
+        y_fit = y_np[local_sample_idx]
+        w_fit = weights[local_sample_idx] if weights is not None else np.ones(len(y_fit), dtype="float32")
+        model = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=alpha, random_state=seed))
+        _fit_with_optional_weights(model, X_fit, y_fit, w_fit)
+        predict_positions = np.flatnonzero(np.asarray(local_predict_mask, dtype=bool))
+        pred_parts: List[np.ndarray] = []
+        for start in range(0, len(predict_positions), 120_000):
+            chunk_positions = predict_positions[start : start + 120_000]
+            X_chunk = attention_features(
+                factor_token_state(chunk_positions, align_sign=align_sign),
+                seed=seed,
+                heads=heads,
+                temperature=temperature,
+                decay=decay,
+                prior_strength=prior_strength,
+            )
+            pred_parts.append(np.asarray(model.predict(X_chunk), dtype="float32"))
+        diagnostics: Dict[str, Any] = {}
+        try:
+            ridge = model.named_steps.get("ridge")
+            coef = np.asarray(getattr(ridge, "coef_", []), dtype="float64").reshape(-1)
+            raw_coef = np.abs(coef[: len(feature_cols) * len(channel_names)]).reshape(len(feature_cols), len(channel_names))
+            channel_weight = raw_coef.sum(axis=0)
+            total = float(channel_weight.sum()) or 1.0
+            diagnostics["channel_importance"] = [
+                {"channel": name, "share": float(value / total)}
+                for name, value in zip(channel_names, channel_weight, strict=False)
+            ]
+            diagnostics["temporal_decay_share"] = float(channel_weight[3:].sum() / total)
+        except Exception:
+            diagnostics = {}
+        return (np.concatenate(pred_parts).astype("float32") if pred_parts else np.array([], dtype="float32")), diagnostics
+
+    def fit_sklearn_head(
+        local_train_mask: pd.Series,
+        local_predict_mask: pd.Series,
+        *,
+        kind: str,
+        seed: int,
+    ) -> np.ndarray:
+        X_all = model_frame
+        y_local = _make_training_target(frame.loc[local_train_mask, "resp"].astype("float32"))
+        y_np = y_local.to_numpy(dtype="float32", copy=False)
+        w_np = _make_training_weights(y_local)
+        train_np = X_all.loc[local_train_mask].to_numpy(dtype="float32", copy=False)
+        if kind == "lgb":
+            builder: Any = lgb.LGBMRegressor(
+                n_estimators=220,
+                learning_rate=0.03,
+                num_leaves=23,
+                subsample=0.82,
+                colsample_bytree=0.82,
+                reg_lambda=1.8,
+                min_child_samples=120,
+                n_jobs=-1,
+                random_state=seed,
+                verbose=-1,
+            )
+            max_rows = 280_000
+        else:
+            builder = make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=2.5, random_state=seed))
+            max_rows = 360_000
+        X_fit, y_fit, w_fit = _sample_training_rows(train_np, y_np, max_rows=max_rows, sample_weight=w_np)
+        if w_fit is None:
+            w_fit = np.ones(len(y_fit), dtype="float32")
+        _fit_with_optional_weights(builder, X_fit, y_fit, w_fit)
+        pred_chunks: List[np.ndarray] = []
+        X_pred = X_all.loc[local_predict_mask]
+        for start in range(0, len(X_pred), 120_000):
+            chunk = X_pred.iloc[start : start + 120_000].to_numpy(dtype="float32", copy=False)
+            pred_chunks.append(np.asarray(builder.predict(chunk), dtype="float32"))
+        return np.concatenate(pred_chunks).astype("float32") if pred_chunks else np.array([], dtype="float32")
+
+    def fit_rank_head(local_train_mask: pd.Series, local_predict_mask: pd.Series) -> np.ndarray:
+        weights = _build_combo_weights(
+            model_name="TrainICIRRankCombo",
+            train_features=frame.loc[local_train_mask, feature_cols].astype("float32"),
+            y_train=frame.loc[local_train_mask, "resp"].astype("float32"),
+            feature_cols=feature_cols,
+        )
+        pred = _weighted_rank_combo_prediction(
+            frame.loc[local_predict_mask, feature_cols].astype("float32"),
+            feature_cols,
+            weights,
+        )
+        return pred.to_numpy(dtype="float32", copy=False)
+
+    def normalize_array(pred: np.ndarray, index: pd.Index) -> np.ndarray:
+        return _normalize_alpha_series(pd.Series(pred, index=index, dtype="float32")).to_numpy(dtype="float32", copy=False)
+
+    attention_configs = [
+        {"name": "attn_decay_low", "seed": 51, "heads": 24, "temperature": 0.75, "alpha": 1.6, "decay": 0.62, "prior_strength": 0.15, "align_sign": True},
+        {"name": "attn_decay_mid", "seed": 52, "heads": 32, "temperature": 0.95, "alpha": 2.2, "decay": 0.78, "prior_strength": 0.25, "align_sign": True},
+        {"name": "attn_context_wide", "seed": 53, "heads": 40, "temperature": 1.25, "alpha": 3.2, "decay": 0.88, "prior_strength": 0.10, "align_sign": False},
+    ]
+    val_index = model_frame.loc[val_mask].index
+    val_resp = frame.loc[val_mask, "resp"].astype("float32")
+    val_heads: Dict[str, np.ndarray] = {}
+    attention_diagnostics: Dict[str, Any] = {}
+    best_attention_config = attention_configs[0]
+    best_attention_score = -1e18
+    for config in attention_configs:
+        pred_val, diag = fit_attention_ridge(fit_mask, val_mask, **{k: v for k, v in config.items() if k != "name"})
+        val_heads[config["name"]] = normalize_array(pred_val, val_index)
+        metrics = _combo_period_metrics(pd.Series(val_heads[config["name"]], index=val_index), val_resp, fee_bps=DEFAULT_FEE_BPS)
+        score = float(metrics.get("Score", 0.0))
+        if score > best_attention_score:
+            best_attention_score = score
+            best_attention_config = config
+            attention_diagnostics = diag
+
+    val_heads["ridge"] = normalize_array(fit_sklearn_head(fit_mask, val_mask, kind="ridge", seed=61), val_index)
+    val_heads["lgb"] = normalize_array(fit_sklearn_head(fit_mask, val_mask, kind="lgb", seed=62), val_index)
+    val_heads["rank_icir"] = normalize_array(fit_rank_head(fit_mask, val_mask), val_index)
+
+    blend_candidates: List[tuple[str, Dict[str, float]]] = []
+    for name in val_heads:
+        blend_candidates.append((name, {name: 1.0}))
+    attn_name = str(best_attention_config["name"])
+    for ridge_weight in (0.15, 0.25, 0.35, 0.50):
+        blend_candidates.append((f"{attn_name}_ridge_{ridge_weight:.2f}", {attn_name: 1.0 - ridge_weight, "ridge": ridge_weight}))
+    for lgb_weight in (0.10, 0.20, 0.30):
+        blend_candidates.append((f"{attn_name}_lgb_{lgb_weight:.2f}", {attn_name: 1.0 - lgb_weight, "lgb": lgb_weight}))
+    blend_candidates.extend(
+        [
+            ("attn_ridge_lgb_602020", {attn_name: 0.60, "ridge": 0.20, "lgb": 0.20}),
+            ("attn_ridge_lgb_rank_50201515", {attn_name: 0.50, "ridge": 0.20, "lgb": 0.15, "rank_icir": 0.15}),
+            ("ridge_attn_lgb_403030", {"ridge": 0.40, attn_name: 0.30, "lgb": 0.30}),
+        ]
+    )
+
+    best_blend_name = ""
+    best_blend_weights: Dict[str, float] = {}
+    best_blend_score = -1e18
+    best_blend_metrics: Dict[str, Any] = {}
+    for blend_name, weights in blend_candidates:
+        combined = np.zeros(len(val_index), dtype="float32")
+        total_weight = 0.0
+        for name, weight in weights.items():
+            if name not in val_heads:
+                continue
+            combined += np.float32(weight) * val_heads[name]
+            total_weight += float(weight)
+        if total_weight <= 0:
+            continue
+        combined = combined / np.float32(total_weight)
+        metrics = _combo_period_metrics(pd.Series(combined, index=val_index), val_resp, fee_bps=DEFAULT_FEE_BPS)
+        score = float(metrics.get("Score", 0.0))
+        tie_ic = float(metrics.get("IC", 0.0))
+        current_ic = float(best_blend_metrics.get("IC", -1e18)) if best_blend_metrics else -1e18
+        if score > best_blend_score or (abs(score - best_blend_score) < 1e-9 and tie_ic > current_ic):
+            best_blend_name = blend_name
+            best_blend_weights = {name: float(weight / total_weight) for name, weight in weights.items() if name in val_heads}
+            best_blend_score = score
+            best_blend_metrics = metrics
+
+    pred_index = model_frame.loc[predict_mask].index
+    final_heads: Dict[str, np.ndarray] = {}
+    needed = set(best_blend_weights)
+    if attn_name in needed:
+        pred_attn, attention_diagnostics = fit_attention_ridge(
+            train_mask,
+            predict_mask,
+            **{k: v for k, v in best_attention_config.items() if k != "name"},
+        )
+        final_heads[attn_name] = normalize_array(pred_attn, pred_index)
+    if "ridge" in needed:
+        final_heads["ridge"] = normalize_array(fit_sklearn_head(train_mask, predict_mask, kind="ridge", seed=61), pred_index)
+    if "lgb" in needed:
+        final_heads["lgb"] = normalize_array(fit_sklearn_head(train_mask, predict_mask, kind="lgb", seed=62), pred_index)
+    if "rank_icir" in needed:
+        final_heads["rank_icir"] = normalize_array(fit_rank_head(train_mask, predict_mask), pred_index)
+
+    pred = np.zeros(len(pred_index), dtype="float32")
+    for name, weight in best_blend_weights.items():
+        if name in final_heads:
+            pred += np.float32(weight) * final_heads[name]
+
+    folded_importance = {col: float(abs_ic[idx]) for idx, col in enumerate(feature_cols)}
+    return {
+        "pred": pred.astype("float32"),
+        "importance": folded_importance,
+        "attention_config": best_attention_config,
+        "blend_name": best_blend_name,
+        "blend_weights": best_blend_weights,
+        "validation_metrics": {
+            key: value
+            for key, value in best_blend_metrics.items()
+            if key not in {"prediction_comparison_curve", "daily_ic_curve", "daily_rank_ic_curve", "combo_tvr_curve", "strategy"}
+        },
+        "diagnostics": {
+            "attention": attention_diagnostics,
+            "selected_attention_config": best_attention_config,
+            "selected_blend": best_blend_name,
+            "selected_blend_weights": best_blend_weights,
+            "validation_selection_score": best_blend_score,
+        },
+    }
+
+
+def _select_temporal_factor_cols(
+    frame: pd.DataFrame,
+    y_train: pd.Series,
+    feature_cols: List[str],
+    train_mask: pd.Series,
+    *,
+    max_factors: int = 24,
+) -> List[str]:
+    if len(feature_cols) <= max_factors:
+        return list(feature_cols)
+    stats = _compute_factor_daily_ic_stats(
+        frame.loc[train_mask, feature_cols].astype("float32"),
+        y_train.astype("float32"),
+        feature_cols,
+    )
+    ranked = sorted(
+        feature_cols,
+        key=lambda col: (
+            float(stats.get(col, {}).get("abs_ic", 0.0)),
+            float(stats.get(col, {}).get("ic_ir", 0.0)),
+        ),
+        reverse=True,
+    )
+    return ranked[:max_factors]
+
+
+def _make_temporal_feature_frame(
+    frame: pd.DataFrame,
+    selected_cols: List[str],
+    *,
+    seq_len: int = 8,
+) -> tuple[pd.DataFrame, List[str], int, int]:
+    z = _cs_zscore_frame(frame, selected_cols).astype("float32")
+    z.columns = [f"{col}__z" for col in selected_cols]
+    r = _cs_rank_frame(frame, selected_cols).astype("float32")
+    r.columns = [f"{col}__rank" for col in selected_cols]
+    base = pd.concat([z, r], axis=1).replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
+    pieces: List[pd.DataFrame] = []
+    by_security = base.groupby(level="security_id", sort=False)
+    for lag in range(seq_len):
+        lagged = base if lag == 0 else by_security.shift(lag).fillna(0.0)
+        lagged = lagged.astype("float32", copy=False)
+        lagged.columns = [f"{col}__lag{lag}" for col in base.columns]
+        pieces.append(lagged)
+    temporal = pd.concat(pieces, axis=1).replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
+    return temporal, list(temporal.columns), seq_len, len(base.columns)
+
+
+def _fit_predict_temporal_torch_model(
+    *,
+    model_name: str,
+    feature_cols: List[str],
+    frame: pd.DataFrame,
+    train_mask: pd.Series,
+    predict_mask: pd.Series,
+) -> Dict[str, Any]:
+    y_train = frame.loc[train_mask, "resp"].astype("float32")
+    selected_cols = _select_temporal_factor_cols(frame, y_train, feature_cols, train_mask, max_factors=24)
+    temporal_frame, temporal_feature_names, seq_len, n_channels = _make_temporal_feature_frame(
+        frame,
+        selected_cols,
+        seq_len=8,
+    )
+    arch = {
+        "TorchTCNMetaModel": "tcn",
+        "TorchGRUMetaModel": "gru",
+        "TorchTransformerMetaModel": "transformer",
+    }[model_name]
+    model = TorchTemporalSequenceRegressor(
+        architecture=arch,
+        seq_len=seq_len,
+        n_channels=n_channels,
+        hidden_size=64 if arch != "transformer" else 48,
+        epochs=4 if arch != "transformer" else 3,
+        batch_size=8192,
+        lr=7e-4,
+        weight_decay=2e-4,
+        random_state=42,
+    )
+    y_train_model = _make_training_target(y_train)
+    y_train_np = y_train_model.to_numpy(dtype="float32", copy=False)
+    train_weights = _make_training_weights(y_train_model)
+    X_fit, y_fit, w_fit = _sample_training_rows(
+        temporal_frame.loc[train_mask, temporal_feature_names].to_numpy(dtype="float32", copy=False),
+        y_train_np,
+        max_rows=60_000 if arch != "transformer" else 45_000,
+        sample_weight=train_weights,
+    )
+    if w_fit is None:
+        w_fit = np.ones(len(y_fit), dtype="float32")
+    model.fit(X_fit, y_fit, sample_weight=w_fit)
+    pred = model.predict(
+        temporal_frame.loc[predict_mask, temporal_feature_names].to_numpy(dtype="float32", copy=False)
+    )
+    importance = {col: 0.0 for col in feature_cols}
+    for col in selected_cols:
+        importance[col] = 1.0
+    return {
+        "pred": pred,
+        "importance": importance,
+        "temporal_selected_factors": selected_cols,
+    }
+
+
+def _fit_predict_temporal_tabular_model(
+    *,
+    model_name: str,
+    feature_cols: List[str],
+    frame: pd.DataFrame,
+    train_mask: pd.Series,
+    predict_mask: pd.Series,
+) -> Dict[str, Any]:
+    y_train = frame.loc[train_mask, "resp"].astype("float32")
+    selected_cols = _select_temporal_factor_cols(frame, y_train, feature_cols, train_mask, max_factors=24)
+    temporal_frame, temporal_feature_names, _seq_len, _n_channels = _make_temporal_feature_frame(
+        frame,
+        selected_cols,
+        seq_len=8,
+    )
+    builders: Dict[str, tuple[Any, int]] = {
+        "TemporalRidgeLagMetaModel": (
+            make_pipeline(StandardScaler(with_mean=False), Ridge(alpha=4.0, random_state=42)),
+            260_000,
+        ),
+        "TemporalLightGBMLagMetaModel": (
+            lgb.LGBMRegressor(
+                n_estimators=220,
+                learning_rate=0.035,
+                num_leaves=31,
+                subsample=0.85,
+                colsample_bytree=0.75,
+                reg_lambda=1.5,
+                min_child_samples=120,
+                n_jobs=-1,
+                random_state=42,
+                verbose=-1,
+            ),
+            220_000,
+        ),
+        "TemporalHistGBLagMetaModel": (
+            HistGradientBoostingRegressor(
+                max_iter=160,
+                learning_rate=0.04,
+                max_leaf_nodes=31,
+                l2_regularization=0.2,
+                random_state=42,
+            ),
+            180_000,
+        ),
+        "TemporalExtraTreesLagMetaModel": (
+            ExtraTreesRegressor(
+                n_estimators=120,
+                max_depth=10,
+                min_samples_leaf=120,
+                max_features="sqrt",
+                n_jobs=-1,
+                random_state=42,
+            ),
+            160_000,
+        ),
+    }
+    model, max_rows = builders[model_name]
+    y_train_model = _make_training_target(y_train)
+    y_train_np = y_train_model.to_numpy(dtype="float32", copy=False)
+    train_weights = _make_training_weights(y_train_model)
+    X_fit, y_fit, w_fit = _sample_training_rows(
+        temporal_frame.loc[train_mask, temporal_feature_names].to_numpy(dtype="float32", copy=False),
+        y_train_np,
+        max_rows=max_rows,
+        sample_weight=train_weights,
+    )
+    if w_fit is None:
+        w_fit = np.ones(len(y_fit), dtype="float32")
+    _fit_with_optional_weights(model, X_fit, y_fit, w_fit)
+    pred = model.predict(temporal_frame.loc[predict_mask, temporal_feature_names].to_numpy(dtype="float32", copy=False))
+    raw_importance = _extract_importance(model, temporal_feature_names)
+    importance = {col: 0.0 for col in feature_cols}
+    for temporal_name, score in raw_importance.items():
+        factor_id = temporal_name.split("__", 1)[0]
+        if factor_id in importance:
+            importance[factor_id] += float(score)
+    return {
+        "pred": pred,
+        "importance": importance,
+        "temporal_selected_factors": selected_cols,
+    }
 
 
 def _fit_predict_models(
@@ -1632,7 +2705,7 @@ def _normalize_alpha_series(pred: pd.Series) -> pd.Series:
 
 
 def _model_spec_items() -> list[tuple[str, Any, int]]:
-    return [
+    items = [
         ("EqualWeightRankCombo", lambda: None, 0),
         ("TrainICRankCombo", lambda: None, 0),
         ("TrainICIRRankCombo", lambda: None, 0),
@@ -1652,7 +2725,35 @@ def _model_spec_items() -> list[tuple[str, Any, int]]:
         ("HistGradientBoostingMetaModel", lambda: HistGradientBoostingRegressor(max_iter=180, learning_rate=0.045, max_leaf_nodes=31, l2_regularization=0.15, random_state=42), 220_000),
         ("LightGBMMetaModel", lambda: lgb.LGBMRegressor(n_estimators=260, learning_rate=0.035, num_leaves=31, subsample=0.85, colsample_bytree=0.85, reg_lambda=1.0, min_child_samples=80, n_jobs=-1, random_state=42, verbose=-1), 260_000),
         ("MLPRegressorMetaModel", lambda: make_pipeline(StandardScaler(with_mean=False), MLPRegressor(hidden_layer_sizes=(96, 32), activation="relu", alpha=1e-4, learning_rate_init=8e-4, batch_size=4096, max_iter=80, early_stopping=True, validation_fraction=0.12, n_iter_no_change=8, random_state=42)), 160_000),
+        ("TemporalRidgeLagMetaModel", lambda: None, 0),
+        ("TemporalLightGBMLagMetaModel", lambda: None, 0),
+        ("TemporalHistGBLagMetaModel", lambda: None, 0),
+        ("TemporalExtraTreesLagMetaModel", lambda: None, 0),
+        ("FactorTokenTransformerRidgeStackModel", lambda: None, 0),
+        ("CausalDecayFactorTransformerStackModel", lambda: None, 0),
     ]
+    if str(os.environ.get("AUTOALPHA_ENABLE_TORCH_MODELS", "")).lower() in {"1", "true", "yes", "on"}:
+        items.extend(
+            [
+                ("TorchMPSMLPMetaModel", lambda: TorchMPSMLPRegressor(hidden_sizes=(96, 32), epochs=4, batch_size=8192, lr=8e-4, weight_decay=1e-4, random_state=42), 60_000),
+                ("TorchTCNMetaModel", lambda: None, 0),
+                ("TorchGRUMetaModel", lambda: None, 0),
+                ("TorchTransformerMetaModel", lambda: None, 0),
+            ]
+        )
+    model_filter = [
+        item.strip()
+        for item in str(os.environ.get("AUTOALPHA_MODEL_FILTER", "")).split(",")
+        if item.strip()
+    ]
+    if model_filter:
+        wanted = set(model_filter)
+        items = [item for item in items if item[0] in wanted]
+    return items
+
+
+def _active_model_names() -> List[str]:
+    return [name for name, _builder, _max_rows in _model_spec_items()]
 
 
 def _get_model_spec(model_name: str) -> tuple[Any, int]:
@@ -1712,6 +2813,41 @@ def _fit_predict_window_model(
             pred_features=frame.loc[predict_mask, feature_cols].astype("float32"),
             pred_ranked_features=combo_rank_frame.loc[predict_mask, feature_cols] if combo_rank_frame is not None else None,
             stats_bundle=combo_stats,
+        )
+
+    if model_name in TEMPORAL_TORCH_MODEL_NAMES:
+        return _fit_predict_temporal_torch_model(
+            model_name=model_name,
+            feature_cols=feature_cols,
+            frame=frame,
+            train_mask=train_mask,
+            predict_mask=predict_mask,
+        )
+
+    if model_name in TEMPORAL_TABULAR_MODEL_NAMES:
+        return _fit_predict_temporal_tabular_model(
+            model_name=model_name,
+            feature_cols=feature_cols,
+            frame=frame,
+            train_mask=train_mask,
+            predict_mask=predict_mask,
+        )
+
+    if model_name in FACTOR_TRANSFORMER_MODEL_NAMES:
+        if model_name == "CausalDecayFactorTransformerStackModel":
+            return _fit_predict_causal_decay_factor_transformer_stack(
+                feature_cols=feature_cols,
+                frame=frame,
+                model_frame=model_frame,
+                train_mask=train_mask,
+                predict_mask=predict_mask,
+            )
+        return _fit_predict_factor_token_transformer_stack(
+            feature_cols=feature_cols,
+            frame=frame,
+            model_frame=model_frame,
+            train_mask=train_mask,
+            predict_mask=predict_mask,
         )
 
     return _fit_predict_single_model(
@@ -2567,6 +3703,9 @@ def _execute_combo_lab(
     model_daily_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
     model_daily_gross_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
     model_daily_fees: Dict[str, List[pd.Series]] = defaultdict(list)
+    model_daily_long_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
+    model_daily_long_gross_pnls: Dict[str, List[pd.Series]] = defaultdict(list)
+    model_daily_long_fees: Dict[str, List[pd.Series]] = defaultdict(list)
     model_prediction_comparisons: Dict[str, List[List[Dict[str, Any]]]] = defaultdict(list)
     importance_store: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     window_summaries: List[Dict[str, Any]] = []
@@ -2586,9 +3725,15 @@ def _execute_combo_lab(
     train_mask = frame.index.get_level_values("date").isin(train_period_days)
     test_mask = frame.index.get_level_values("date").isin(eval_period_days)
     combo_frame = frame.loc[:, feature_cols].astype("float32")
-    model_frame, _model_feature_cols = _make_model_feature_frame(frame, feature_cols)
-    combo_rank_frame = model_frame.loc[:, [f"{col}__rank" for col in feature_cols]].copy()
-    combo_rank_frame.columns = feature_cols
+    active_model_names = _active_model_names()
+    transformer_only = bool(active_model_names) and set(active_model_names).issubset(FACTOR_TRANSFORMER_MODEL_NAMES)
+    if transformer_only:
+        model_frame, _model_feature_cols = _make_model_feature_frame(frame, feature_cols, max_temporal=24)
+        combo_rank_frame = None
+    else:
+        model_frame, _model_feature_cols = _make_model_feature_frame(frame, feature_cols)
+        combo_rank_frame = model_frame.loc[:, [f"{col}__rank" for col in feature_cols]].copy()
+        combo_rank_frame.columns = feature_cols
     X_train = combo_frame.loc[train_mask, feature_cols]
     y_train = frame.loc[train_mask, "resp"]
     X_test = combo_frame.loc[test_mask, feature_cols]
@@ -2652,26 +3797,24 @@ def _execute_combo_lab(
             )
         else:
             try:
-                train_probe = _fit_predict_window_model(
+                probe_mask = fit_mask | val_mask
+                probe_output = _fit_predict_window_model(
                     model_name=model_name,
                     feature_cols=feature_cols,
                     frame=frame,
                     model_frame=model_frame,
                     combo_rank_frame=combo_rank_frame,
                     train_mask=fit_mask,
-                    predict_mask=fit_mask,
+                    predict_mask=probe_mask,
                 )
-                val_probe = _fit_predict_window_model(
-                    model_name=model_name,
-                    feature_cols=feature_cols,
-                    frame=frame,
-                    model_frame=model_frame,
-                    combo_rank_frame=combo_rank_frame,
-                    train_mask=fit_mask,
-                    predict_mask=val_mask,
+                probe_pred = pd.Series(
+                    probe_output["pred"],
+                    index=model_frame.loc[probe_mask].index,
+                    name="pred",
+                    dtype="float32",
                 )
-                train_pred = pd.Series(train_probe["pred"], index=model_frame.loc[fit_mask].index, name="pred", dtype="float32")
-                val_pred = pd.Series(val_probe["pred"], index=model_frame.loc[val_mask].index, name="pred", dtype="float32")
+                train_pred = probe_pred.loc[probe_pred.index.get_level_values("date").isin(fit_days)]
+                val_pred = probe_pred.loc[probe_pred.index.get_level_values("date").isin(val_days)]
                 train_metrics = _combo_period_metrics(train_pred, frame.loc[fit_mask, "resp"].astype("float32"), fee_bps=fee_bps)
                 val_metrics = _combo_period_metrics(val_pred, frame.loc[val_mask, "resp"].astype("float32"), fee_bps=fee_bps)
                 oos_metrics = _combo_period_metrics(pred, y_test, fee_bps=fee_bps)
@@ -2707,11 +3850,15 @@ def _execute_combo_lab(
             "hit_ratio": evaluation["strategy"]["hit_ratio"],
             "avg_turnover": evaluation["strategy"]["avg_turnover"],
             "train_val_metrics": train_val_metrics,
+            "model_diagnostics": model_output.get("diagnostics", {}),
         }
         model_window_metrics[model_name].append({**window, **payload})
         model_daily_pnls[model_name].append(evaluation["strategy"]["daily_pnl"])
         model_daily_gross_pnls[model_name].append(evaluation["strategy"]["daily_gross_pnl"])
         model_daily_fees[model_name].append(evaluation["strategy"]["daily_fee"])
+        model_daily_long_pnls[model_name].append(evaluation["strategy"]["daily_long_pnl"])
+        model_daily_long_gross_pnls[model_name].append(evaluation["strategy"]["daily_long_gross_pnl"])
+        model_daily_long_fees[model_name].append(evaluation["strategy"]["daily_long_fee"])
         model_prediction_comparisons[model_name].append(
             [
                 {
@@ -2749,10 +3896,17 @@ def _execute_combo_lab(
         concatenated = pd.concat(model_daily_pnls[model_name]).sort_index()
         gross_concatenated = pd.concat(model_daily_gross_pnls[model_name]).sort_index()
         fee_concatenated = pd.concat(model_daily_fees[model_name]).sort_index()
+        long_concatenated = pd.concat(model_daily_long_pnls[model_name]).sort_index()
+        long_gross_concatenated = pd.concat(model_daily_long_gross_pnls[model_name]).sort_index()
+        long_fee_concatenated = pd.concat(model_daily_long_fees[model_name]).sort_index()
         cumulative = concatenated.cumsum()
         gross_cumulative = gross_concatenated.cumsum()
         fee_cumulative = fee_concatenated.cumsum()
+        long_cumulative = long_concatenated.cumsum()
+        long_gross_cumulative = long_gross_concatenated.cumsum()
+        long_fee_cumulative = long_fee_concatenated.cumsum()
         drawdown = cumulative - cumulative.cummax()
+        long_drawdown = long_cumulative - long_cumulative.cummax()
         avg_ic = float(np.mean([item["daily_ic_mean"] for item in metrics_list]))
         avg_rank_ic = float(np.mean([item["daily_rank_ic_mean"] for item in metrics_list]))
         avg_ir = float(np.mean([item.get("daily_rank_ic_ir", 0.0) for item in metrics_list]))
@@ -2761,6 +3915,10 @@ def _execute_combo_lab(
         gross_pnl = float(gross_cumulative.iloc[-1]) if len(gross_cumulative) else 0.0
         total_fee = float(fee_cumulative.iloc[-1]) if len(fee_cumulative) else 0.0
         max_drawdown = float(drawdown.min()) if len(drawdown) else 0.0
+        long_total_pnl = float(long_cumulative.iloc[-1]) if len(long_cumulative) else 0.0
+        long_gross_pnl = float(long_gross_cumulative.iloc[-1]) if len(long_gross_cumulative) else 0.0
+        long_total_fee = float(long_fee_cumulative.iloc[-1]) if len(long_fee_cumulative) else 0.0
+        long_max_drawdown = float(long_drawdown.min()) if len(long_drawdown) else 0.0
         hit_ratio = float(np.mean([item["hit_ratio"] for item in metrics_list]))
         avg_turnover = float(np.mean([item.get("avg_turnover", 0.0) for item in metrics_list]))
         prediction_comparison_curve = sorted(
@@ -2790,6 +3948,10 @@ def _execute_combo_lab(
             "gross_pnl": gross_pnl,
             "total_fee": total_fee,
             "max_drawdown": max_drawdown,
+            "long_only_total_pnl": long_total_pnl,
+            "long_only_gross_pnl": long_gross_pnl,
+            "long_only_total_fee": long_total_fee,
+            "long_only_max_drawdown": long_max_drawdown,
             "hit_ratio": hit_ratio,
             "avg_turnover": avg_turnover,
             "window_metrics": metrics_list,
@@ -2798,12 +3960,18 @@ def _execute_combo_lab(
             "gross_cumulative_curve": _serialize_curve(gross_cumulative),
             "fee_cumulative_curve": _serialize_curve(fee_cumulative),
             "daily_pnl_curve": _serialize_curve(concatenated),
+            "long_only_cumulative_curve": _serialize_curve(long_cumulative),
+            "long_only_drawdown_curve": _serialize_curve(long_drawdown),
+            "long_only_gross_cumulative_curve": _serialize_curve(long_gross_cumulative),
+            "long_only_fee_cumulative_curve": _serialize_curve(long_fee_cumulative),
+            "daily_long_pnl_curve": _serialize_curve(long_concatenated),
             "prediction_comparison_curve": prediction_comparison_curve,
             "top_features": importance_items[:20],
             "input_factor_correlations": input_factor_correlations,
             "all_factor_correlations": [],
             "method_card": _combo_method_card(model_name),
             "train_val_metrics": metrics_list[0].get("train_val_metrics", {}) if metrics_list else {},
+            "model_diagnostics": metrics_list[0].get("model_diagnostics", {}) if metrics_list else {},
             "train_val_curve": model_train_val_curves.get(model_name, []),
             "combo_weights": [
                 {"factor": col, "weight": float(model_combo_weights.get(model_name, {}).get(col, 0.0))}
@@ -2917,6 +4085,7 @@ def _execute_combo_lab(
         "submit_factor_output": submit_factor_output,
         "best_model_input_factor_correlations": model_summaries.get(best_model, {}).get("input_factor_correlations", []) if best_model else [],
         "best_model_all_factor_correlations": [],
+        "research_references": MODEL_LAB_REFERENCES,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     _plot_summary(summary, run_dir)

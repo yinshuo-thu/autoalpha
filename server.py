@@ -1346,6 +1346,10 @@ def _compact_model_lab_summary(summary: Optional[Dict[str, Any]]) -> Optional[Di
                 "gross_pnl",
                 "total_fee",
                 "max_drawdown",
+                "long_only_total_pnl",
+                "long_only_gross_pnl",
+                "long_only_total_fee",
+                "long_only_max_drawdown",
                 "hit_ratio",
                 "avg_turnover",
                 "submit_IC",
@@ -1363,16 +1367,23 @@ def _compact_model_lab_summary(summary: Optional[Dict[str, Any]]) -> Optional[Di
             )
             if key in payload
         }
-        for key in (
-            "cumulative_curve",
-            "drawdown_curve",
-            "daily_pnl_curve",
-            "prediction_comparison_curve",
-            "train_val_curve",
-            "combo_tvr_curve",
-        ):
+        curve_limits = {
+            "cumulative_curve": 96,
+            "drawdown_curve": 96,
+            "daily_pnl_curve": 96,
+            "long_only_cumulative_curve": 96,
+            "long_only_drawdown_curve": 96,
+            "long_only_gross_cumulative_curve": 96,
+            "long_only_fee_cumulative_curve": 96,
+            "daily_long_pnl_curve": 96,
+            "prediction_comparison_curve": 96,
+            "train_val_curve": 120,
+            "combo_tvr_curve": 96,
+        }
+        for key in curve_limits:
             if key in payload:
-                model_payload[key] = payload.get(key)
+                rows = payload.get(key)
+                model_payload[key] = _compress_points(rows, max_points=curve_limits[key]) if isinstance(rows, list) else rows
         model_payload["input_factor_correlations"] = _compact_corr_rows(
             payload.get("input_factor_correlations"),
             limit=24 if model_name == best_model else 12,

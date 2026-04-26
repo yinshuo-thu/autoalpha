@@ -193,6 +193,11 @@ interface ModelLabModelSummary {
   gross_cumulative_curve?: ModelLabPoint[];
   fee_cumulative_curve?: ModelLabPoint[];
   daily_pnl_curve: ModelLabPoint[];
+  long_only_cumulative_curve?: ModelLabPoint[];
+  long_only_drawdown_curve?: ModelLabPoint[];
+  long_only_gross_cumulative_curve?: ModelLabPoint[];
+  long_only_fee_cumulative_curve?: ModelLabPoint[];
+  daily_long_pnl_curve?: ModelLabPoint[];
   prediction_comparison_curve?: Array<{
     date: string;
     mean_prediction: number;
@@ -201,6 +206,9 @@ interface ModelLabModelSummary {
     predicted_spread: number;
     realized_spread: number;
     predicted_spread_aligned?: number;
+    daily_ic?: number;
+    daily_rank_ic?: number;
+    daily_pnl?: number;
     window_id?: number;
     test_start?: string;
     test_end?: string;
@@ -301,6 +309,7 @@ interface ModelLabSummary {
     formula?: string;
     is_input_factor?: boolean;
   }>;
+  fusion_lab?: FusionLabSummary;
 }
 
 interface ModelLabPayload {
@@ -316,6 +325,56 @@ interface ModelLabPayload {
     best_model?: string;
     models?: Record<string, ModelLabModelSummary>;
   }>;
+}
+
+interface FusionLabSummary {
+  created_at?: string;
+  selected_model?: string;
+  selected_mechanism?: string;
+  best_oos_fusion_model?: string;
+  best_oos_fusion_mechanism?: string;
+  leakage_note?: string;
+  candidate_models?: Array<{
+    model: string;
+    val_score: number;
+    val_ic: number;
+    val_ir: number;
+    submit_score?: number;
+    submit_ic?: number;
+    submit_ir?: number;
+  }>;
+  output_correlation_matrix?: Array<{
+    model: string;
+    label: string;
+    values: Array<{ model: string; label: string; corr: number }>;
+  }>;
+  top_output_correlation_pairs?: Array<{ left: string; right: string; corr: number; abs_corr: number }>;
+  fusion_weights?: Record<string, number>;
+  candidate_mechanisms?: Array<{
+    name: string;
+    validation_proxy: number;
+    corr_penalty: number;
+    selection_objective: number;
+    weights: Record<string, number>;
+  }>;
+  fusion_results?: Array<{
+    model: string;
+    mechanism: string;
+    Score: number;
+    IC: number;
+    IR: number;
+    TVR: number;
+    selection_objective?: number;
+    weights?: Record<string, number>;
+  }>;
+  oos_result?: {
+    model?: string;
+    mechanism?: string;
+    Score?: number;
+    IC?: number;
+    IR?: number;
+    TVR?: number;
+  };
 }
 
 interface InspirationRecord {
@@ -405,24 +464,24 @@ const COLORS = {
 
 type MethodGroupKey = 'linear' | 'ml' | 'combo';
 
-const METHOD_GROUP_META: Record<MethodGroupKey, { label: string; rank: number; chipClass: string; rowClass: string }> = {
+const METHOD_GROUP_META: Record<MethodGroupKey, { rank: number; rowClass: string; textClass: string; label: string }> = {
   linear: {
-    label: '线性拟合类',
     rank: 0,
-    chipClass: 'bg-sky-100 text-sky-700',
     rowClass: 'bg-sky-50/70 hover:bg-sky-100/80',
+    textClass: 'text-sky-700',
+    label: 'Linear',
   },
   ml: {
-    label: '机器学习/深度学习类',
     rank: 1,
-    chipClass: 'bg-violet-100 text-violet-700',
     rowClass: 'bg-violet-50/70 hover:bg-violet-100/80',
+    textClass: 'text-violet-700',
+    label: 'ML / DL',
   },
   combo: {
-    label: '组合类',
     rank: 2,
-    chipClass: 'bg-emerald-100 text-emerald-700',
     rowClass: 'bg-emerald-50/70 hover:bg-emerald-100/80',
+    textClass: 'text-emerald-700',
+    label: 'Combo',
   },
 };
 
@@ -470,10 +529,7 @@ function stripComboName(value: string) {
 function getMethodGroup(modelName: string): MethodGroupKey {
   const lower = modelName.toLowerCase();
   const isMetaModel = lower.includes('metamodel') || lower.includes('regressor') || lower.includes('forest') || lower.includes('boost');
-  if (isMetaModel && (lower.includes('ridge') || lower.includes('linear') || lower.includes('lasso') || lower.includes('elastic'))) {
-    return 'linear';
-  }
-  if (
+  const isMlOrDl =
     isMetaModel
     || lower.includes('lightgbm')
     || lower.includes('xgboost')
@@ -483,7 +539,14 @@ function getMethodGroup(modelName: string): MethodGroupKey {
     || lower.includes('mlp')
     || lower.includes('torch')
     || lower.includes('neural')
-  ) {
+    || lower.includes('transformer')
+    || lower.includes('causaldecay')
+    || lower.includes('factortoken')
+    || lower.includes('fusion');
+  if (isMetaModel && (lower.includes('ridge') || lower.includes('linear') || lower.includes('lasso') || lower.includes('elastic'))) {
+    return 'linear';
+  }
+  if (isMlOrDl) {
     return 'ml';
   }
   return 'combo';
@@ -496,14 +559,31 @@ function getMethodGroupMeta(modelName: string) {
 function sortModelEntries(entries: Array<[string, ModelLabModelSummary]>) {
   return entries
     .filter(([modelName, payload]) => modelName !== 'EqualWeightRankCombo' || ((payload.submit_IC ?? 0) >= 0))
-    .sort(([aName], [bName]) => {
-      const aGroup = getMethodGroup(aName);
-      const bGroup = getMethodGroup(bName);
-      return METHOD_GROUP_META[aGroup].rank - METHOD_GROUP_META[bGroup].rank || aName.localeCompare(bName);
+    .sort(([aName, aPayload], [bName, bPayload]) => {
+      const scoreDiff = Number(bPayload.submit_Score ?? 0) - Number(aPayload.submit_Score ?? 0);
+      if (Math.abs(scoreDiff) > 1e-9) return scoreDiff;
+      const icDiff = Number(bPayload.submit_IC ?? 0) - Number(aPayload.submit_IC ?? 0);
+      if (Math.abs(icDiff) > 1e-9) return icDiff;
+      return aName.localeCompare(bName);
     });
 }
 
-function groupSeparators(rows: Array<{ modelLabel: string; group: MethodGroupKey; groupLabel: string }>) {
+function sortModelEntriesByGroup(entries: Array<[string, ModelLabModelSummary]>) {
+  return sortModelEntries(entries).sort(([aName, aPayload], [bName, bPayload]) => {
+    const aGroup = getMethodGroup(aName);
+    const bGroup = getMethodGroup(bName);
+    const groupDiff = METHOD_GROUP_META[aGroup].rank - METHOD_GROUP_META[bGroup].rank;
+    if (groupDiff !== 0) return groupDiff;
+
+    const scoreDiff = Number(bPayload.submit_Score ?? 0) - Number(aPayload.submit_Score ?? 0);
+    if (Math.abs(scoreDiff) > 1e-9) return scoreDiff;
+    const icDiff = Number(bPayload.submit_IC ?? 0) - Number(aPayload.submit_IC ?? 0);
+    if (Math.abs(icDiff) > 1e-9) return icDiff;
+    return aName.localeCompare(bName);
+  });
+}
+
+function groupSeparators(rows: Array<{ modelLabel: string; group: MethodGroupKey }>) {
   return rows
     .map((row, index) => ({ ...row, index }))
     .filter((row, index) => index > 0 && row.group !== rows[index - 1].group);
@@ -616,6 +696,69 @@ function buildZeroAlignedDomains(leftValues: number[], rightValues: number[]): {
   return { left: expand(left), right: expand(right) };
 }
 
+type PnlDrawdownPoint = {
+  date: string;
+  pnl: number;
+  drawdown: number;
+};
+
+function buildPnlDrawdownSeries(cumulative?: ModelLabPoint[], drawdown?: ModelLabPoint[]): PnlDrawdownPoint[] {
+  const drawdownByDate = new Map((drawdown || []).map((point) => [point.date, Number(point.value) || 0]));
+  return (cumulative || [])
+    .map((point) => ({
+      date: point.date,
+      pnl: Number(point.value) || 0,
+      drawdown: drawdownByDate.get(point.date) ?? 0,
+    }))
+    .filter((point) => Number.isFinite(point.pnl) && Number.isFinite(point.drawdown));
+}
+
+const PnlDrawdownChart = ({
+  title,
+  data,
+  pnlColor = '#2563eb',
+  heightClass = 'h-[210px]',
+}: {
+  title: string;
+  data: PnlDrawdownPoint[];
+  pnlColor?: string;
+  heightClass?: string;
+}) => {
+  const finalPnl = data.length ? data[data.length - 1].pnl : 0;
+  const maxDrawdown = data.length ? Math.min(...data.map((point) => point.drawdown)) : 0;
+  return (
+    <div className="rounded-2xl bg-slate-50 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-medium text-slate-700">{title}</div>
+        <div className="flex gap-2 text-[11px] text-slate-600">
+          <span>PnL {formatNumber(finalPnl, 4)}</span>
+          <span>Max DD {formatNumber(maxDrawdown, 4)}</span>
+        </div>
+      </div>
+      {data.length ? (
+        <div className={heightClass}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={formatAxisTime} minTickGap={26} />
+              <YAxis yAxisId="left" tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={(value) => formatNumber(Number(value), 3)} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={(value) => formatNumber(Number(value), 3)} />
+              <Tooltip formatter={(value: number) => formatNumber(Number(value), 5)} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <ReferenceLine yAxisId="left" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+              <ReferenceLine yAxisId="right" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+              <Line yAxisId="left" type="linear" dataKey="pnl" name="累计 PnL" stroke={pnlColor} strokeWidth={2.3} dot={false} />
+              <Line yAxisId="right" type="linear" dataKey="drawdown" name="Max DD" stroke="#ef4444" strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div className="py-8 text-sm text-muted-foreground">暂无 PnL / Max DD 曲线。</div>
+      )}
+    </div>
+  );
+};
+
 function buildAbsCorrelationHistogram(
   rows: Array<{ abs_corr?: number }>,
   binCount = 10,
@@ -649,6 +792,16 @@ function getComboDisplayTvr(payload?: ModelLabModelSummary | null) {
   if (Number.isFinite(local) && local > 0) return local;
   const submit = Number(payload.submit_tvr);
   return Number.isFinite(submit) ? submit : 0;
+}
+
+function corrCellColor(value: number) {
+  const clipped = Math.max(0, Math.min(1, Math.abs(Number(value) || 0)));
+  const start = { r: 37, g: 99, b: 235 };
+  const end = { r: 220, g: 38, b: 38 };
+  const r = Math.round(start.r + (end.r - start.r) * clipped);
+  const g = Math.round(start.g + (end.g - start.g) * clipped);
+  const b = Math.round(start.b + (end.b - start.b) * clipped);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function getPhaseMetric(
@@ -781,6 +934,27 @@ const StatCard = ({
     {helper ? <div className="mt-2 break-words text-xs leading-5 text-muted-foreground">{helper}</div> : null}
   </div>
 );
+
+class PageErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-3xl border border-red-200 bg-red-50 p-5 text-sm leading-6 text-red-700">
+          <div className="font-semibold">前端图表渲染异常</div>
+          <div className="mt-2 break-words">{this.state.error.message || '未知错误'}</div>
+          <div className="mt-2 text-xs text-red-600">页面数据已保留，刷新后会重新拉取最新快照。</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const LogPanel = ({ logs }: { logs: string[] }) => {
   const ref = useRef<HTMLDivElement>(null);
@@ -1057,8 +1231,8 @@ const EnsembleModal = ({
                     <Tooltip formatter={(value: number) => formatNumber(Number(value), 5)} />
                     <Legend />
                     <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-                    <Line type="monotone" dataKey="predicted" name="Train/Val predicted spread" stroke="#2563eb" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="realized" name="Train/Val realized spread" stroke="#0f766e" strokeWidth={2} dot={false} />
+                    <Line type="linear" dataKey="predicted" name="Train/Val predicted spread" stroke="#2563eb" strokeWidth={2} dot={{ r: 1.4 }} />
+                    <Line type="linear" dataKey="realized" name="Train/Val realized spread" stroke="#0f766e" strokeWidth={2} dot={{ r: 1.4 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -1394,6 +1568,8 @@ export const AutoAlphaPage: React.FC = () => {
   const lowCorrModelLab = modelLab?.low_corr_exploration ?? null;
   const visibleModelEntries = sortModelEntries(Object.entries(latestModelLab?.models || {}));
   const lowCorrModelEntries = sortModelEntries(Object.entries(lowCorrModelLab?.models || {}));
+  const chartModelEntries = sortModelEntriesByGroup(Object.entries(latestModelLab?.models || {}));
+  const lowCorrChartModelEntries = sortModelEntriesByGroup(Object.entries(lowCorrModelLab?.models || {}));
   const lowCorrBestPayload = lowCorrModelLab?.best_model ? lowCorrModelLab.models?.[lowCorrModelLab.best_model] : undefined;
   const fullBestPayload = latestModelLab?.best_model ? latestModelLab.models?.[latestModelLab.best_model] : undefined;
   const bestComboSummary = [
@@ -1406,26 +1582,27 @@ export const AutoAlphaPage: React.FC = () => {
   ]
     .filter((item): item is { lab: string; model: string; payload: ModelLabModelSummary; selectedCount: number } => Boolean(item))
     .sort((a, b) => (b.payload.submit_Score ?? 0) - (a.payload.submit_Score ?? 0))[0];
-  const bestComboOosSeries = (bestComboSummary?.payload.prediction_comparison_curve || []).map((row) => ({
-    date: row.date,
-    predicted: row.predicted_spread_aligned ?? row.predicted_spread,
-    realized: row.realized_spread,
-  }));
-  const modelComparison = visibleModelEntries.map(([modelName, payload]) => ({
+  const bestComboLongShortPnlSeries = buildPnlDrawdownSeries(
+    bestComboSummary?.payload.cumulative_curve,
+    bestComboSummary?.payload.drawdown_curve,
+  );
+  const bestComboLongOnlyPnlSeries = buildPnlDrawdownSeries(
+    bestComboSummary?.payload.long_only_cumulative_curve,
+    bestComboSummary?.payload.long_only_drawdown_curve,
+  );
+  const modelComparison = chartModelEntries.map(([modelName, payload]) => ({
     model: modelName,
     modelLabel: stripComboName(modelName),
     group: getMethodGroup(modelName),
-    groupLabel: getMethodGroupMeta(modelName).label,
     score: payload.submit_Score ?? 0,
     ic: payload.submit_IC ?? 0,
     ir: payload.submit_IR ?? 0,
     tvr: getComboDisplayTvr(payload),
   }));
-  const lowCorrModelComparison = lowCorrModelEntries.map(([modelName, payload]) => ({
+  const lowCorrModelComparison = lowCorrChartModelEntries.map(([modelName, payload]) => ({
     model: modelName,
     modelLabel: stripComboName(modelName),
     group: getMethodGroup(modelName),
-    groupLabel: getMethodGroupMeta(modelName).label,
     score: payload.submit_Score ?? 0,
     ic: payload.submit_IC ?? 0,
     ir: payload.submit_IR ?? 0,
@@ -1433,7 +1610,7 @@ export const AutoAlphaPage: React.FC = () => {
   }));
   const modelComparisonSeparators = groupSeparators(modelComparison);
   const lowCorrModelComparisonSeparators = groupSeparators(lowCorrModelComparison);
-  const trainValTestRows = visibleModelEntries
+  const trainValTestRows = chartModelEntries
     .map(([modelName, payload]) => {
       const trainScore = getPhaseMetric(payload, 'train', 'Score');
       const valScore = getPhaseMetric(payload, 'val', 'Score');
@@ -1445,7 +1622,6 @@ export const AutoAlphaPage: React.FC = () => {
         model: modelName,
         modelLabel: stripComboName(modelName),
         group: getMethodGroup(modelName),
-        groupLabel: getMethodGroupMeta(modelName).label,
         trainScore,
         valScore,
         testScore,
@@ -1486,13 +1662,12 @@ export const AutoAlphaPage: React.FC = () => {
     lowCorrModelComparison.map((row) => row.score),
     lowCorrModelComparison.flatMap((row) => [row.ic, row.ir])
   );
-  const methodTrendComparison = visibleModelEntries.map(([modelName, payload]) => {
+  const methodTrendComparison = chartModelEntries.map(([modelName, payload]) => {
     const lowPayload = lowCorrModelLab?.models?.[modelName];
     return {
       model: modelName,
       modelLabel: stripComboName(modelName),
       group: getMethodGroup(modelName),
-      groupLabel: getMethodGroupMeta(modelName).label,
       fullScore: payload.submit_Score ?? 0,
       lowScore: lowPayload?.submit_Score ?? 0,
       fullIC: payload.submit_IC ?? 0,
@@ -1505,16 +1680,29 @@ export const AutoAlphaPage: React.FC = () => {
   });
   const methodTrendSeparators = groupSeparators(methodTrendComparison);
   const lowCorrFactorList = (lowCorrModelLab?.selected_factors || []).map((item) => item.run_id);
-  const fullBestOosSeries = (fullBestPayload?.prediction_comparison_curve || []).map((row) => ({
-    date: row.date,
-    predicted: row.predicted_spread_aligned ?? row.predicted_spread,
-    realized: row.realized_spread,
+  const fullBestLongShortPnlSeries = buildPnlDrawdownSeries(fullBestPayload?.cumulative_curve, fullBestPayload?.drawdown_curve);
+  const fullBestLongOnlyPnlSeries = buildPnlDrawdownSeries(fullBestPayload?.long_only_cumulative_curve, fullBestPayload?.long_only_drawdown_curve);
+  const lowCorrBestLongShortPnlSeries = buildPnlDrawdownSeries(lowCorrBestPayload?.cumulative_curve, lowCorrBestPayload?.drawdown_curve);
+  const lowCorrBestLongOnlyPnlSeries = buildPnlDrawdownSeries(lowCorrBestPayload?.long_only_cumulative_curve, lowCorrBestPayload?.long_only_drawdown_curve);
+  const fusionLab = latestModelLab?.fusion_lab;
+  const fusionResults = (fusionLab?.fusion_results || []).map((row) => ({
+    model: row.model,
+    modelLabel: stripComboName(row.model).replace(/^Fusion/, ''),
+    mechanism: row.mechanism,
+    score: row.Score ?? 0,
+    ic: row.IC ?? 0,
+    ir: row.IR ?? 0,
+    tvr: row.TVR ?? 0,
+    selectionObjective: row.selection_objective ?? 0,
+    isValSelected: row.model === fusionLab?.selected_model,
+    isOosBest: row.model === fusionLab?.best_oos_fusion_model,
   }));
-  const lowCorrBestOosSeries = (lowCorrBestPayload?.prediction_comparison_curve || []).map((row) => ({
-    date: row.date,
-    predicted: row.predicted_spread_aligned ?? row.predicted_spread,
-    realized: row.realized_spread,
-  }));
+  const fusionWeightRows = Object.entries(fusionLab?.fusion_weights || {})
+    .map(([model, weight]) => ({ model, modelLabel: stripComboName(model), weight: Number(weight) || 0 }))
+    .sort((a, b) => b.weight - a.weight);
+  const fusionMatrixRows = fusionLab?.output_correlation_matrix || [];
+  const fusionMatrixColumns = fusionMatrixRows[0]?.values?.map((item) => ({ model: item.model, label: item.label })) || [];
+  const fusionCorrelationPairs = (fusionLab?.top_output_correlation_pairs || []).slice(0, 6);
 
   const statusData = Object.entries(knowledge?.status_breakdown ?? {}).map(([name, value]) => ({
     name,
@@ -1615,7 +1803,8 @@ export const AutoAlphaPage: React.FC = () => {
   };
 
   return (
-    <div className="min-w-0 max-w-full space-y-6 overflow-x-hidden pb-10">
+    <PageErrorBoundary>
+      <div className="min-w-0 max-w-full space-y-6 overflow-x-hidden pb-10">
       <Panel
         title="AutoAlpha Research Cockpit"
         subtitle="主控制台与独立回测已收口到这里。现在统一在 AutoAlpha 页里完成灵感输入、全量挖掘、云端一致口径评估、rolling 模型实验与产出查看。"
@@ -1850,26 +2039,9 @@ export const AutoAlphaPage: React.FC = () => {
 		                      <div className="mt-1 font-semibold text-slate-800">{bestComboSummary.selectedCount}</div>
 		                    </div>
 		                  </div>
-		                  <div className="mt-4 rounded-2xl bg-white/80 p-3">
-		                    <div className="mb-2 text-xs font-medium text-slate-700">2024 OOS 时序</div>
-		                    {bestComboOosSeries.length ? (
-		                      <div className="h-[190px]">
-		                        <ResponsiveContainer width="100%" height="100%">
-		                          <LineChart data={bestComboOosSeries} margin={{ top: 6, right: 10, bottom: 4, left: 0 }}>
-		                            <CartesianGrid strokeDasharray="3 3" stroke="#dbeafe" />
-		                            <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickFormatter={formatAxisTime} minTickGap={26} />
-		                            <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
-		                            <Tooltip formatter={(value: number) => formatNumber(Number(value), 5)} />
-		                            <Legend wrapperStyle={{ fontSize: 11 }} />
-		                            <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-		                            <Line type="monotone" dataKey="predicted" name="预测 spread（对齐）" stroke="#2563eb" strokeWidth={2.2} dot={false} />
-		                            <Line type="monotone" dataKey="realized" name="实际 resp spread" stroke="#0f766e" strokeWidth={2.2} dot={false} />
-		                          </LineChart>
-		                        </ResponsiveContainer>
-		                      </div>
-		                    ) : (
-		                      <div className="text-sm text-muted-foreground">当前最佳 Combo 暂无可展示的 OOS 时序。</div>
-		                    )}
+		                  <div className="mt-4 space-y-3 rounded-2xl bg-white/80 p-3">
+		                    <PnlDrawdownChart title="2024 OOS 多空 PnL + Max DD" data={bestComboLongShortPnlSeries} pnlColor="#2563eb" heightClass="h-[170px]" />
+		                    <PnlDrawdownChart title="2024 OOS 纯多头 PnL + Max DD" data={bestComboLongOnlyPnlSeries} pnlColor="#0f766e" heightClass="h-[170px]" />
 		                  </div>
 		                </>
 		              ) : (
@@ -2103,7 +2275,7 @@ export const AutoAlphaPage: React.FC = () => {
 
         <Panel title="Exploratory OOS Combo Lab" subtitle="使用全部有效因子，固定以 2022-2023 为训练期、2024 为模拟 OOS 期，只保留真实 OOS 阶段也能实现的 combo 方法，并展示 2024 的 OOS Score / IC / IR / TVR 及相关性结构。">
           <div className="grid min-w-0 gap-5 xl:grid-cols-2">
-            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+            <div className="flex h-[700px] min-w-0 flex-col rounded-3xl border border-border/50 bg-white/90 p-4">
 	              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
 	                <Sparkles className="h-4 w-4 text-emerald-500" />
 	                OOS Combo 摘要
@@ -2118,7 +2290,7 @@ export const AutoAlphaPage: React.FC = () => {
                 <StatCard label="最佳 Score" value={formatNumber(latestModelLab?.best_score ?? 0, 2)} helper={latestModelLab?.best_model || '等待实验结果'} accent="bg-emerald-50" />
               </div>
 
-	              <div className="mt-4 space-y-3">
+	              <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
 	                {visibleModelEntries.map(([modelName, payload]) => {
 	                  const isBestModel = modelName === latestModelLab?.best_model;
 	                  const groupMeta = getMethodGroupMeta(modelName);
@@ -2129,11 +2301,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                      className={`w-full rounded-2xl p-3 text-left transition-colors ${groupMeta.rowClass}`}
 	                    >
 	                      <div className="flex min-w-0 items-center justify-between gap-3">
-	                        <div className="flex min-w-0 items-center gap-2">
-	                          <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
-	                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${groupMeta.chipClass}`}>{groupMeta.label}</span>
-	                          {isBestModel ? <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span> : null}
-	                        </div>
+		                        <div className="flex min-w-0 items-center gap-2">
+		                          <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
+		                          {isBestModel ? <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">BEST</span> : null}
+		                        </div>
 	                        <div className="shrink-0 text-xs text-muted-foreground">TVR {formatNumber(getComboDisplayTvr(payload), 1)}</div>
                       </div>
                       <div className="mt-2 grid gap-2 text-[11px] text-slate-600 sm:grid-cols-2 xl:grid-cols-4">
@@ -2151,7 +2322,7 @@ export const AutoAlphaPage: React.FC = () => {
               </div>
             </div>
 
-	            <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+	            <div className="flex h-[700px] min-w-0 flex-col rounded-3xl border border-border/50 bg-white/90 p-4">
 	              <div className="mb-2 text-sm font-medium text-foreground">低相关组合探索</div>
 	              <div className="mb-3 text-xs leading-5 text-muted-foreground">
 	                固定使用 8 个低相关提交因子，导出 pq 文件会附加 `lowcorr8` 后缀，便于和全因子结果区分。
@@ -2162,13 +2333,13 @@ export const AutoAlphaPage: React.FC = () => {
                 <StatCard label="探索最佳 IC" value={formatNumber(lowCorrModelLab?.best_ic ?? 0, 2)} helper={lowCorrModelLab?.best_model || '--'} accent="bg-sky-50" />
                 <StatCard label="探索最佳 Score" value={formatNumber(lowCorrModelLab?.best_score ?? 0, 2)} helper={lowCorrBestPayload ? `相对全因子 ${formatNumber((lowCorrBestPayload.submit_Score ?? 0) - (fullBestPayload?.submit_Score ?? 0), 2)}` : '--'} accent="bg-emerald-50" />
               </div>
-              <div className="mt-4 rounded-2xl bg-slate-50 p-3 text-[11px] leading-6 text-slate-600">
+              <div className="mt-4 max-h-24 overflow-y-auto rounded-2xl bg-slate-50 p-3 text-[11px] leading-6 text-slate-600">
                 使用因子:
                 <div className="mt-2 break-all font-mono text-[11px] text-slate-700">
                   {lowCorrFactorList.length ? lowCorrFactorList.join(' / ') : '--'}
                 </div>
               </div>
-	              <div className="mt-4 space-y-3">
+	              <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
 	                {lowCorrModelEntries.map(([modelName, payload]) => {
 	                  const isBestModel = modelName === lowCorrModelLab?.best_model;
 	                  const groupMeta = getMethodGroupMeta(modelName);
@@ -2179,11 +2350,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                      className={`w-full rounded-2xl p-3 text-left transition-colors ${groupMeta.rowClass}`}
 	                    >
 	                      <div className="flex min-w-0 items-center justify-between gap-3">
-	                        <div className="flex min-w-0 items-center gap-2">
-	                          <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
-	                          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${groupMeta.chipClass}`}>{groupMeta.label}</span>
-	                          {isBestModel ? <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">BEST</span> : null}
-	                        </div>
+		                        <div className="flex min-w-0 items-center gap-2">
+		                          <div className="min-w-0 truncate font-medium text-foreground">{modelName}</div>
+		                          {isBestModel ? <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">BEST</span> : null}
+		                        </div>
 	                        <div className="shrink-0 text-xs text-muted-foreground">TVR {formatNumber(getComboDisplayTvr(payload), 1)}</div>
                       </div>
                       <div className="mt-2 grid gap-2 text-[11px] text-slate-600 sm:grid-cols-2 xl:grid-cols-4">
@@ -2201,22 +2371,13 @@ export const AutoAlphaPage: React.FC = () => {
 
           <div className="mt-5 grid min-w-0 gap-5 xl:grid-cols-2">
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">全因子最佳 combo：2024 OOS 时序</div>
+              <div className="mb-3 text-sm font-medium text-foreground">全因子最佳 combo：2024 OOS PnL / Max DD</div>
               <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                预测 spread 已按当日 realized spread 的均值方差对齐；权重只由 2022-2023 训练期确定。
+                上图为 top-bottom 多空组合累计 PnL，下图为只持有预测最高 top 20% 的纯多头累计 PnL；红线均为对应回撤曲线。
               </div>
-              <div className="h-[260px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={fullBestOosSeries} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisTime} minTickGap={28} />
-                    <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <Tooltip formatter={(value: number) => formatNumber(Number(value), 5)} />
-                    <Legend />
-                    <Line type="monotone" dataKey="predicted" name="因子预测 spread（对齐）" stroke="#2563eb" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="realized" name="实际 resp spread" stroke="#0f766e" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+              <div className="space-y-3">
+                <PnlDrawdownChart title="多空组合 PnL + Max DD" data={fullBestLongShortPnlSeries} pnlColor="#2563eb" />
+                <PnlDrawdownChart title="纯多头 PnL + Max DD" data={fullBestLongOnlyPnlSeries} pnlColor="#0f766e" />
               </div>
 	              <div className="mt-4 grid gap-3 text-sm text-slate-700 sm:grid-cols-4">
 	                <div className="rounded-2xl bg-slate-50 p-3">Score {formatNumber(fullBestPayload?.submit_Score ?? 0, 2)}</div>
@@ -2227,22 +2388,13 @@ export const AutoAlphaPage: React.FC = () => {
             </div>
 
             <div className="min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
-              <div className="mb-3 text-sm font-medium text-foreground">低相关 8 因子最佳 combo：2024 OOS 时序</div>
+              <div className="mb-3 text-sm font-medium text-foreground">低相关 8 因子最佳 combo：2024 OOS PnL / Max DD</div>
               <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                同样固定 2022-2023 训练、2024 只检验，用低相关篮子观察组合稳健性。
+                同样固定 2022-2023 训练、2024 只检验；上图多空，下图纯多头，均用红线标出对应 Max DD 路径。
               </div>
-              <div className="h-[260px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={lowCorrBestOosSeries} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisTime} minTickGap={28} />
-                    <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                    <Tooltip formatter={(value: number) => formatNumber(Number(value), 5)} />
-                    <Legend />
-                    <Line type="monotone" dataKey="predicted" name="因子预测 spread（对齐）" stroke="#7c3aed" strokeWidth={2.5} dot={false} />
-                    <Line type="monotone" dataKey="realized" name="实际 resp spread" stroke="#0f766e" strokeWidth={2.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+              <div className="space-y-3">
+                <PnlDrawdownChart title="多空组合 PnL + Max DD" data={lowCorrBestLongShortPnlSeries} pnlColor="#7c3aed" />
+                <PnlDrawdownChart title="纯多头 PnL + Max DD" data={lowCorrBestLongOnlyPnlSeries} pnlColor="#0f766e" />
               </div>
 	              <div className="mt-4 grid gap-3 text-sm text-slate-700 sm:grid-cols-5">
 	                <div className="rounded-2xl bg-slate-50 p-3">TVR {formatNumber(getComboDisplayTvr(lowCorrBestPayload), 1)}</div>
@@ -2253,6 +2405,128 @@ export const AutoAlphaPage: React.FC = () => {
 	              </div>
 	            </div>
 	          </div>
+
+		          <div className="mt-5 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
+		            <div className="mb-1 text-sm font-medium text-foreground">Model Fusion Lab：输出相关性与融合结果</div>
+		            <div className="mb-3 text-xs leading-5 text-muted-foreground">
+		              先计算冻结模型输出之间的相关度，再用 2022-2023 Val 指标和相关性惩罚生成融合权重；2024 标签只用于最终展示，不参与权重选择。
+		            </div>
+		            {fusionResults.length ? (
+		              <div className="grid min-w-0 gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+		                <div className="min-w-0">
+		                  <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+		                    <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">Val 选择：{fusionLab?.selected_mechanism || '--'}</span>
+		                    <span className="rounded-full bg-sky-50 px-2 py-1 text-sky-700">2024 诊断最佳：{fusionLab?.best_oos_fusion_mechanism || '--'}</span>
+		                    <span className="rounded-full bg-slate-50 px-2 py-1 text-slate-600">当前最佳仍为 {latestModelLab?.best_model || '--'}</span>
+		                  </div>
+		                  <div className="h-[300px]">
+		                    <ResponsiveContainer width="100%" height="100%">
+		                      <BarChart data={fusionResults} margin={{ top: 8, right: 16, bottom: 52, left: 0 }}>
+		                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+		                        <XAxis dataKey="modelLabel" tick={{ fill: '#64748b', fontSize: 11 }} angle={-16} textAnchor="end" height={86} interval={0} />
+		                        <YAxis yAxisId="left" allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} />
+		                        <YAxis yAxisId="right" orientation="right" tick={{ fill: '#64748b', fontSize: 11 }} />
+		                        <Tooltip formatter={(value: number, name: string) => [formatNumber(Number(value), name === 'OOS Score' ? 1 : 2), name]} />
+		                        <Legend />
+		                        <Bar yAxisId="left" dataKey="score" name="OOS Score" fill="#0f766e" radius={[6, 6, 0, 0]}>
+		                          {fusionResults.map((row) => (
+		                            <Cell key={`fusion-score-${row.model}`} fill={row.isOosBest ? '#059669' : row.isValSelected ? '#2563eb' : '#94a3b8'} />
+		                          ))}
+		                        </Bar>
+		                        <Bar yAxisId="right" dataKey="ic" name="OOS IC" fill="#2563eb" radius={[6, 6, 0, 0]} />
+		                        <Bar yAxisId="right" dataKey="ir" name="OOS IR" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+		                      </BarChart>
+		                    </ResponsiveContainer>
+		                  </div>
+		                  <div className="mt-3 grid gap-3 text-sm text-slate-700 sm:grid-cols-4">
+		                    <div className="rounded-2xl bg-slate-50 p-3">最佳融合 Score {formatNumber(Math.max(...fusionResults.map((row) => row.score)), 2)}</div>
+		                    <div className="rounded-2xl bg-slate-50 p-3">最佳融合 IC {formatNumber(Math.max(...fusionResults.map((row) => row.ic)), 2)}</div>
+		                    <div className="rounded-2xl bg-slate-50 p-3">融合候选 {fusionResults.length}</div>
+		                    <div className="rounded-2xl bg-slate-50 p-3">相关矩阵 {fusionMatrixRows.length}×{fusionMatrixColumns.length}</div>
+		                  </div>
+		                </div>
+		                <div className="min-w-0">
+		                  <div className="mb-2 text-xs font-medium text-slate-600">Val 选择机制权重</div>
+		                  <div className="space-y-2">
+		                    {fusionWeightRows.map((row) => (
+		                      <div key={row.model}>
+		                        <div className="mb-1 flex items-center justify-between gap-3 text-[11px] text-slate-600">
+		                          <span className="truncate">{row.modelLabel}</span>
+		                          <span>{formatNumber(row.weight * 100, 1)}%</span>
+		                        </div>
+		                        <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+		                          <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.max(2, row.weight * 100)}%` }} />
+		                        </div>
+		                      </div>
+		                    ))}
+		                  </div>
+		                  <div className="mt-4 text-xs leading-5 text-muted-foreground">{fusionLab?.leakage_note || ''}</div>
+		                </div>
+		              </div>
+		            ) : (
+		              <div className="rounded-2xl bg-slate-50 p-4 text-sm text-muted-foreground">暂无融合实验结果。</div>
+		            )}
+		            {fusionMatrixRows.length ? (
+		              <div className="mt-5 grid min-w-0 gap-5 xl:grid-cols-[1.2fr_0.8fr]">
+		                <div className="min-w-0 overflow-x-auto rounded-2xl border border-slate-100 bg-slate-50 p-3">
+		                  <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+		                    {(['linear', 'ml', 'combo'] as MethodGroupKey[]).map((group) => (
+		                      <span key={`fusion-legend-${group}`} className={`${METHOD_GROUP_META[group].textClass} rounded-full bg-white px-2 py-1 font-medium`}>
+		                        {METHOD_GROUP_META[group].label}
+		                      </span>
+		                    ))}
+		                    <span className="rounded-full bg-white px-2 py-1 font-medium text-slate-500">色轴：|corr| 0 蓝 / 1 红</span>
+		                  </div>
+		                  <div
+		                    className="grid gap-1 text-[10px]"
+		                    style={{ gridTemplateColumns: `120px repeat(${fusionMatrixColumns.length}, minmax(48px, 1fr))` }}
+		                  >
+		                    <div />
+		                    {fusionMatrixColumns.map((col) => (
+		                      <div
+		                        key={`fusion-col-${col.model}`}
+		                        className={`truncate text-center font-semibold ${getMethodGroupMeta(col.model).textClass}`}
+		                        title={`${col.model} · ${getMethodGroupMeta(col.model).label}`}
+		                      >
+		                        {col.label}
+		                      </div>
+		                    ))}
+		                    {fusionMatrixRows.map((row) => (
+		                      <React.Fragment key={`fusion-row-${row.model}`}>
+		                        <div
+		                          className={`truncate pr-2 text-right font-semibold ${getMethodGroupMeta(row.model).textClass}`}
+		                          title={`${row.model} · ${getMethodGroupMeta(row.model).label}`}
+		                        >
+		                          {row.label}
+		                        </div>
+		                        {row.values.slice(0, fusionMatrixColumns.length).map((cell) => (
+		                          <div
+		                            key={`${row.model}-${cell.model}`}
+		                            className="rounded-md px-1 py-2 text-center font-medium text-white"
+		                            style={{ backgroundColor: corrCellColor(cell.corr) }}
+		                            title={`${row.model} vs ${cell.model}: corr ${formatNumber(cell.corr, 3)}, |corr| ${formatNumber(Math.abs(cell.corr), 3)}`}
+		                          >
+		                            {formatNumber(Math.abs(cell.corr), 2)}
+		                          </div>
+		                        ))}
+		                      </React.Fragment>
+		                    ))}
+		                  </div>
+		                </div>
+		                <div className="min-w-0 rounded-2xl bg-slate-50 p-3">
+		                  <div className="mb-2 text-xs font-medium text-slate-600">最高相关输出对</div>
+		                  <div className="space-y-2">
+		                    {fusionCorrelationPairs.map((row) => (
+		                      <div key={`${row.left}-${row.right}`} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-600">
+		                        <div className="truncate font-medium text-slate-800">{stripComboName(row.left)} / {stripComboName(row.right)}</div>
+		                        <div className="mt-1">corr {formatNumber(row.corr, 3)}</div>
+		                      </div>
+		                    ))}
+		                  </div>
+		                </div>
+		              </div>
+		            ) : null}
+		          </div>
 
 		          <div className="mt-5 min-w-0 rounded-3xl border border-border/50 bg-white/90 p-4">
 		            <div className="mb-1 text-sm font-medium text-foreground">Train / Val / Test 过拟合诊断</div>
@@ -2273,10 +2547,10 @@ export const AutoAlphaPage: React.FC = () => {
 		                      <XAxis dataKey="modelLabel" tick={{ fill: '#64748b', fontSize: 11 }} angle={-14} textAnchor="end" height={78} interval={0} />
 		                      <YAxis allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} domain={overfitScoreDomain} />
 			                      <Tooltip formatter={(value: number, name: string) => [formatNumber(Number(value), 1), name]} />
-			                      <Legend />
-			                      {trainValTestSeparators.map((item) => (
-			                        <ReferenceLine key={`score-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-			                      ))}
+				                      <Legend />
+				                      {trainValTestSeparators.map((item) => (
+				                        <ReferenceLine key={`score-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+				                      ))}
 			                      <Bar dataKey="trainScore" name="Train Score" fill="#94a3b8" radius={[5, 5, 0, 0]} />
 			                      <Bar dataKey="valScore" name="Val Score" fill="#f59e0b" radius={[5, 5, 0, 0]} />
 		                      <Bar dataKey="testScore" name="Test Score" fill="#0f766e" radius={[5, 5, 0, 0]} />
@@ -2293,10 +2567,10 @@ export const AutoAlphaPage: React.FC = () => {
 		                      <XAxis dataKey="modelLabel" tick={{ fill: '#64748b', fontSize: 11 }} angle={-14} textAnchor="end" height={78} interval={0} />
 		                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={(value) => formatNumber(Number(value), 1)} domain={overfitIcDomain} />
 			                      <Tooltip formatter={(value: number, name: string) => [formatNumber(Number(value), 2), name]} />
-			                      <Legend />
-			                      {trainValTestSeparators.map((item) => (
-			                        <ReferenceLine key={`ic-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-			                      ))}
+				                      <Legend />
+				                      {trainValTestSeparators.map((item) => (
+				                        <ReferenceLine key={`ic-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+				                      ))}
 			                      <Bar dataKey="trainIC" name="Train IC" fill="#94a3b8" radius={[5, 5, 0, 0]} />
 			                      <Bar dataKey="valIC" name="Val IC" fill="#f59e0b" radius={[5, 5, 0, 0]} />
 		                      <Bar dataKey="testIC" name="Test IC" fill="#2563eb" radius={[5, 5, 0, 0]} />
@@ -2318,10 +2592,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                  <YAxis yAxisId="right" orientation="right" allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} domain={modelComparisonDomains.right} />
 		                  <Tooltip />
 		                  <Legend />
-		                  <ReferenceLine yAxisId="left" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-		                  {modelComparisonSeparators.map((item) => (
-		                    <ReferenceLine key={item.modelLabel} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-		                  ))}
+			                  <ReferenceLine yAxisId="left" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+			                  {modelComparisonSeparators.map((item) => (
+			                    <ReferenceLine key={item.modelLabel} yAxisId="left" x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+			                  ))}
 		                  <Bar yAxisId="left" dataKey="score" name="OOS Score" fill="#0f766e" radius={[6, 6, 0, 0]} />
 	                  <Bar yAxisId="right" dataKey="ic" name="OOS IC" fill="#2563eb" radius={[6, 6, 0, 0]} />
 	                  <Bar yAxisId="right" dataKey="ir" name="OOS IR" fill="#f59e0b" radius={[6, 6, 0, 0]} />
@@ -2341,10 +2615,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                  <YAxis yAxisId="right" orientation="right" allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} domain={lowCorrModelComparisonDomains.right} />
 		                  <Tooltip />
 		                  <Legend />
-		                  <ReferenceLine yAxisId="left" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-		                  {lowCorrModelComparisonSeparators.map((item) => (
-		                    <ReferenceLine key={item.modelLabel} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-		                  ))}
+				                  <ReferenceLine yAxisId="left" y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+				                  {lowCorrModelComparisonSeparators.map((item) => (
+				                    <ReferenceLine key={item.modelLabel} yAxisId="left" x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+				                  ))}
 		                  <Bar yAxisId="left" dataKey="score" name="OOS Score" fill="#7c3aed" radius={[6, 6, 0, 0]} />
 	                  <Bar yAxisId="right" dataKey="ic" name="OOS IC" fill="#2563eb" radius={[6, 6, 0, 0]} />
 	                  <Bar yAxisId="right" dataKey="ir" name="OOS IR" fill="#f59e0b" radius={[6, 6, 0, 0]} />
@@ -2369,10 +2643,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                      <YAxis allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} />
 		                      <Tooltip />
 		                      <Legend />
-		                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-		                      {methodTrendSeparators.map((item) => (
-		                        <ReferenceLine key={`score-trend-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-		                      ))}
+			                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+			                      {methodTrendSeparators.map((item) => (
+			                        <ReferenceLine key={`score-trend-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+			                      ))}
 		                      <Line type="monotone" dataKey="fullScore" name="全量 Score" stroke="#0f766e" strokeWidth={2.2} dot={false} />
 	                      <Line type="monotone" dataKey="lowScore" name="低相关 Score" stroke="#7c3aed" strokeWidth={2.2} dot={false} />
 	                    </LineChart>
@@ -2389,10 +2663,10 @@ export const AutoAlphaPage: React.FC = () => {
 	                      <YAxis allowDecimals={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={formatAxisInteger} />
 		                      <Tooltip />
 		                      <Legend />
-		                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
-		                      {methodTrendSeparators.map((item) => (
-		                        <ReferenceLine key={`ic-trend-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: item.groupLabel, position: 'top', fill: '#64748b', fontSize: 10 }} />
-		                      ))}
+			                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
+			                      {methodTrendSeparators.map((item) => (
+			                        <ReferenceLine key={`ic-trend-${item.modelLabel}`} x={item.modelLabel} stroke="#94a3b8" strokeDasharray="4 4" />
+			                      ))}
 		                      <Line type="monotone" dataKey="fullIC" name="全量 IC" stroke="#2563eb" strokeWidth={2.2} dot={false} />
 	                      <Line type="monotone" dataKey="lowIC" name="低相关 IC" stroke="#f59e0b" strokeWidth={2.2} dot={false} />
 	                    </LineChart>
@@ -2548,6 +2822,7 @@ export const AutoAlphaPage: React.FC = () => {
           onClose={() => setComboModal(null)}
         />
       ) : null}
-    </div>
+      </div>
+    </PageErrorBoundary>
   );
 };
