@@ -1,5 +1,5 @@
 export_submission: true
-formula: cs_rank(ts_decay_linear(-(close_trade_px / vwap - 1), 10))
+formula: cs_rank(-ts_zscore(close_trade_px, 10))
 postprocess: stable_low_turnover
 preprocess:
   lookback_days: 10

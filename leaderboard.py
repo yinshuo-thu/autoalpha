@@ -9,8 +9,7 @@ import json
 from datetime import datetime
 import numpy as np
 import pandas as pd
-
-LEADERBOARD_PATH = os.path.join(os.path.dirname(__file__), 'outputs', 'leaderboard.json')
+from paths import LEADERBOARD_PATH, RESEARCH_ARTIFACTS_ROOT
 
 
 def _ensure_dir():
@@ -24,17 +23,29 @@ def load_leaderboard():
         try:
             with open(LEADERBOARD_PATH, 'r') as f:
                 data = json.load(f)
-                
-            # If the loaded data has a mock origin flagged, clean it
-            clear_mock = False
-            for factor in data.get('factors', []):
-                # If these fields from the previous mock state exist or IC is exact mock value
-                if 'cover_all' not in factor and factor.get('IC', 0) > 0.5:
-                    clear_mock = True
-                    break
-            if clear_mock:
-                print("[LEADERBOARD] Cleaned up legacy mock data from leaderboard.")
+            if not isinstance(data, dict):
                 return {'factors': [], 'last_updated': datetime.now().isoformat()}
+            factors = list(data.get('factors') or [])
+            # 仅剔除「疑似旧 mock」的单条记录，绝不能整表清空；否则下一次 save 会覆盖掉磁盘上全部历史因子。
+            kept = []
+            dropped = 0
+            for factor in factors:
+                if not isinstance(factor, dict):
+                    continue
+                ic = float(factor.get('IC', 0) or 0)
+                if 'cover_all' not in factor and ic > 0.5:
+                    dropped += 1
+                    continue
+                kept.append(factor)
+            if dropped:
+                print(
+                    f"[LEADERBOARD] Removed {dropped} legacy mock-like row(s); kept {len(kept)}.",
+                    flush=True,
+                )
+                data['factors'] = kept
+                data['last_updated'] = datetime.now().isoformat()
+                with open(LEADERBOARD_PATH, 'w') as fh:
+                    json.dump(data, fh, indent=2)
             return data
         except json.JSONDecodeError:
             pass
@@ -68,17 +79,21 @@ def add_or_update_factor(metrics):
     factors = lb.get('factors', [])
     
     factor_name = metrics['factor_name']
+    official_metrics = metrics.get('official_metrics') or {}
+    effective_ic = official_metrics.get('IC', metrics.get('official_IC', metrics.get('IC', 0)))
+    effective_ir = official_metrics.get('IR', metrics.get('official_IR', metrics.get('IR', 0)))
+    effective_turnover = official_metrics.get('Turnover', metrics.get('official_Turnover', metrics.get('Turnover', 0)))
+    effective_score = official_metrics.get('Score', metrics.get('official_Score', metrics.get('Score', 0)))
+    effective_pass = official_metrics.get('PassGates', metrics.get('PassGates', False))
+    effective_gates = official_metrics.get('GatesDetail', metrics.get('gates_detail', {}))
     
     # Check if duplicate formula exists
     formula = metrics.get('formula', '')
     is_duplicate = False
     for f in factors:
+        if f.get('factor_name') == factor_name:
+            continue
         if f.get('formula') == formula and formula:
-            f.update({
-                'classification': 'Drop',
-                'reason': 'Exact formula already exists in library.',
-                'Drop': True
-            })
             is_duplicate = True
             break
             
@@ -87,21 +102,36 @@ def add_or_update_factor(metrics):
         'factor_name': factor_name,
         'family': metrics.get('family', 'unclassified'),
         'formula': formula,
-        'IC': _clean_float(metrics.get('IC')),
+        'IC': _clean_float(effective_ic),
         'rank_ic': _clean_float(metrics.get('rank_ic')),
-        'IR': _clean_float(metrics.get('IR')),
-        'Turnover': _clean_float(metrics.get('Turnover')),
-        'Score': _clean_float(metrics.get('Score')),
+        'IR': _clean_float(effective_ir),
+        'Turnover': _clean_float(effective_turnover),
+        'TurnoverLocal': _clean_float(metrics.get('TurnoverLocal', metrics.get('Turnover'))),
+        'Score': _clean_float(effective_score),
         'cover_all': metrics.get('cover_all', 1),
         'missing_days': metrics.get('missing_days', 0),
-        'maxx': _clean_float(metrics.get('maxx')),
-        'minn': _clean_float(metrics.get('minn')),
+        'maxx': _clean_float(official_metrics.get('maxx', metrics.get('maxx'))),
+        'minn': _clean_float(official_metrics.get('minn', metrics.get('minn'))),
         'stability_score': _clean_float(metrics.get('stability_score')),
         'classification': metrics.get('classification', 'Drop'),
-        'PassGates': metrics.get('PassGates', False),
+        'PassGates': effective_pass,
         'model_ready_flag': metrics.get('model_ready_flag', False),
-        'submission_ready_flag': metrics.get('classification') == 'Submission Ready',
+        'submission_ready_flag': metrics.get(
+            'submission_ready_flag',
+            metrics.get('classification') == 'Submission Ready'
+        ),
         'similarity_cluster': metrics.get('similarity_cluster', 0),
+        'reason': metrics.get('reason', ''),
+        'recommendation': metrics.get('recommendation', ''),
+        'submission_path': metrics.get('submission_path', ''),
+        'submission_dir': metrics.get('submission_dir', ''),
+        'metadata_path': metrics.get('metadata_path', ''),
+        'gates_detail': effective_gates,
+        'sanity_report': metrics.get('sanity_report', {}),
+        'score_formula': metrics.get('score_formula', ''),
+        'score_components': metrics.get('score_components', {}),
+        'metric_mode': official_metrics.get('metric_mode', metrics.get('metric_mode', 'cloud_aligned_preferred')),
+        'turnover_basis': official_metrics.get('turnover_basis', metrics.get('turnover_basis', 'cloud_aligned_preferred')),
         'timestamp': datetime.now().isoformat()
     }
     
@@ -120,7 +150,7 @@ def add_or_update_factor(metrics):
     save_leaderboard(lb)
     
     # Save detailed JSON artifact
-    artifact_dir = os.path.join(os.path.dirname(__file__), 'research_runs')
+    artifact_dir = RESEARCH_ARTIFACTS_ROOT
     os.makedirs(artifact_dir, exist_ok=True)
     with open(os.path.join(artifact_dir, f"{factor_name}.json"), 'w') as f:
         json.dump(metrics, f, indent=2, default=str)

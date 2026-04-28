@@ -33,7 +33,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { formatDate, formatNumber, formatPercent } from '@/utils';
+import { formatDate, formatPercent } from '@/utils';
 
 // ... (existing MetricCard component)
 
@@ -112,20 +112,9 @@ const CumulativeReturnChart: React.FC<{ data: { date: string; value: number }[] 
 };
 
 import { useTaskContext } from '@/context/TaskContext';
+import { getActiveLibraryName } from '@/utils/autoalphaStorage';
 
 // ========================== Component ==========================
-
-// Helper component for metrics
-const MetricCard = ({ label, value, unit = '' }: { label: string; value?: number; unit?: string }) => (
-  <div className="bg-secondary/30 rounded-lg p-3">
-    <div className="text-xs text-muted-foreground mb-1">{label}</div>
-    <div className="text-lg font-bold font-mono">
-      {typeof value === 'number' 
-        ? `${formatNumber(value, 4)}${unit}`
-        : '--'}
-    </div>
-  </div>
-);
 
 export const BacktestPage: React.FC = () => {
   const {
@@ -139,7 +128,7 @@ export const BacktestPage: React.FC = () => {
   // -- Local UI State --
   const [libraries, setLibraries] = useState<string[]>([]);
   // Initialize with saved library from localStorage if available
-  const [selectedLibrary, setSelectedLibrary] = useState(localStorage.getItem('quantaalpha_active_library') || '');
+  const [selectedLibrary, setSelectedLibrary] = useState(() => getActiveLibraryName() || '');
   const [factorSource, setFactorSource] = useState<'custom' | 'combined'>('custom');
   const [factorCount, setFactorCount] = useState(0);
   const [isStarting, setIsStarting] = useState(false);
@@ -308,7 +297,7 @@ export const BacktestPage: React.FC = () => {
           <CardContent className="p-4 flex items-center gap-3">
             <AlertCircle className="h-5 w-5 text-destructive" />
             <span className="text-sm text-destructive">
-              后端服务未连接。请先启动后端：<code className="bg-secondary px-2 py-0.5 rounded">cd frontend-v2 && bash start.sh</code>
+              后端服务未连接。请先启动后端：<code className="bg-secondary px-2 py-0.5 rounded">./start_all.sh</code>
             </span>
           </CardContent>
         </Card>

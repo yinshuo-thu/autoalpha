@@ -1,0 +1,2 @@
+minute_index_future_factor主要用来做股指期货的，有些因子设计到商品期货没有的字段。
+factors.py里面的因子，就是标准的基于bar数据的因子

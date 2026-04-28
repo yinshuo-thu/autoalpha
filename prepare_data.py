@@ -16,30 +16,16 @@ import glob
 import json
 import hashlib
 import argparse
+import re
 import warnings
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from paths import DATA_ROOT, CACHE_ROOT
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-# ── Data root detection ──
-def _detect_data_root():
-    env = os.environ.get('SCIENTECH_DATA_ROOT')
-    if env and os.path.isdir(env):
-        return env
-    candidates = [
-        '/Volumes/T7/Scientech',
-        os.path.expanduser('~/Scientech'),
-        '.',
-    ]
-    for c in candidates:
-        if os.path.isdir(os.path.join(c, 'eq_data_stage1')):
-            return c
-    raise FileNotFoundError("Cannot find data root. Set SCIENTECH_DATA_ROOT env var.")
-
-DATA_ROOT = _detect_data_root()
-CACHE_DIR = os.path.join(DATA_ROOT, 'cache')
+CACHE_DIR = CACHE_ROOT
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ── Allowed fields (competition-safe for factor construction) ──
@@ -76,13 +62,16 @@ def get_trading_days(start='2022-01-04', end='2024-12-31'):
 
 
 def load_single_day_pv(date_str):
-    """Load one day of 1-minute price-volume data."""
     parts = date_str.split('-')
     path = os.path.join(DATA_ROOT, 'eq_data_stage1', 'basic_pv',
                         parts[0], parts[1], parts[2], 'data.pq')
     if not os.path.exists(path):
         return None
-    return pd.read_parquet(path)
+    try:
+        return pd.read_parquet(path)
+    except Exception as e:
+        print(f"Warning: Failed to read pv parquet {path}: {e}")
+        return None
 
 
 def resample_1m_to_15m(df_1m):
@@ -137,13 +126,16 @@ def load_universe():
 
 
 def load_resp(date_str):
-    """Load resp for a single day (EVAL ONLY — never use in factor construction)."""
     parts = date_str.split('-')
     path = os.path.join(DATA_ROOT, 'eq_resp_stage1', 'resp',
                         parts[0], parts[1], parts[2], 'data.pq')
-    if os.path.exists(path):
+    if not os.path.exists(path):
+        return None
+    try:
         return pd.read_parquet(path)
-    return None
+    except Exception as e:
+        print(f"Warning: Failed to read resp parquet {path}: {e}")
+        return None
 
 
 def load_trading_restriction(date_str):
@@ -156,19 +148,90 @@ def load_trading_restriction(date_str):
     return None
 
 
+def _cache_path(prefix, start, end):
+    return os.path.join(CACHE_DIR, f'{prefix}_{start}_{end}.parquet')
+
+
+def _parse_cache_window(path, prefix):
+    """Return (start_ts, end_ts) for cache files named prefix_YYYY-MM-DD_YYYY-MM-DD.parquet."""
+    name = os.path.basename(path)
+    expected = f"{prefix}_"
+    if not name.startswith(expected) or not name.endswith(".parquet"):
+        return None
+    body = name[len(expected):-len(".parquet")]
+    try:
+        start_s, end_s = body.rsplit("_", 1)
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_s):
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_s):
+            return None
+        return pd.Timestamp(start_s), pd.Timestamp(end_s)
+    except Exception:
+        return None
+
+
+def _find_superset_cache(prefix, start, end):
+    """Find the smallest existing cache whose date window covers start/end."""
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    candidates = []
+    for path in glob.glob(os.path.join(CACHE_DIR, f"{prefix}_*.parquet")):
+        parsed = _parse_cache_window(path, prefix)
+        if parsed is None:
+            continue
+        cache_start, cache_end = parsed
+        if cache_start <= start_ts and cache_end >= end_ts:
+            span_days = (cache_end - cache_start).days
+            candidates.append((span_days, path, cache_start, cache_end))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+
+
+def _load_cache_window(prefix, label, start, end, force=False):
+    exact_path = _cache_path(prefix, start, end)
+    if os.path.exists(exact_path) and not force:
+        print(f"[CACHE] Loading cached {label} from {exact_path}")
+        t0 = time.time()
+        df = pd.read_parquet(exact_path)
+        print(f"[CACHE] Loaded {len(df):,} {label} rows in {time.time()-t0:.1f}s")
+        return df
+
+    if force:
+        return None
+
+    superset = _find_superset_cache(prefix, start, end)
+    if superset is None:
+        return None
+    _, path, cache_start, cache_end = superset
+    print(
+        f"[CACHE] Loading {label} window {start} → {end} from superset "
+        f"{os.path.basename(path)} ({cache_start.date()} → {cache_end.date()})"
+    )
+    t0 = time.time()
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    try:
+        df = pd.read_parquet(path, filters=[("date", ">=", start_ts), ("date", "<=", end_ts)])
+    except Exception as exc:
+        print(f"[CACHE] Filtered parquet read failed for {label}: {exc}; falling back to in-memory slice")
+        df = pd.read_parquet(path)
+        if "date" in df.index.names:
+            dates = pd.to_datetime(df.index.get_level_values("date"))
+            df = df.loc[(dates >= start_ts) & (dates <= end_ts)]
+    print(f"[CACHE] Loaded {len(df):,} {label} rows in {time.time()-t0:.1f}s")
+    return df
+
+
 def precompute_15m_cache(start='2022-01-04', end='2024-12-31', force=False):
     """
     Precompute 15-minute resampled data and cache to disk.
     Returns the cached DataFrame.
     """
-    cache_path = os.path.join(CACHE_DIR, f'pv_15m_{start}_{end}.parquet')
-
-    if os.path.exists(cache_path) and not force:
-        print(f"[CACHE] Loading cached 15m data from {cache_path}")
-        t0 = time.time()
-        df = pd.read_parquet(cache_path)
-        print(f"[CACHE] Loaded {len(df):,} rows in {time.time()-t0:.1f}s")
-        return df
+    cache_path = _cache_path('pv_15m', start, end)
+    cached = _load_cache_window('pv_15m', '15m data', start, end, force)
+    if cached is not None:
+        return cached
 
     print(f"[PREPARE] Precomputing 15m data from {start} to {end}...")
     days = get_trading_days(start, end)
@@ -202,11 +265,10 @@ def precompute_15m_cache(start='2022-01-04', end='2024-12-31', force=False):
 
 def precompute_resp_cache(start='2022-01-04', end='2024-12-31', force=False):
     """Cache all resp data (for evaluation)."""
-    cache_path = os.path.join(CACHE_DIR, f'resp_{start}_{end}.parquet')
-
-    if os.path.exists(cache_path) and not force:
-        print(f"[CACHE] Loading cached resp from {cache_path}")
-        return pd.read_parquet(cache_path)
+    cache_path = _cache_path('resp', start, end)
+    cached = _load_cache_window('resp', 'resp', start, end, force)
+    if cached is not None:
+        return cached
 
     print(f"[PREPARE] Loading resp data...")
     days = get_trading_days(start, end)
@@ -225,10 +287,10 @@ def precompute_resp_cache(start='2022-01-04', end='2024-12-31', force=False):
 
 def precompute_tr_cache(start='2022-01-04', end='2024-12-31', force=False):
     """Cache all trading restriction data (for evaluation)."""
-    cache_path = os.path.join(CACHE_DIR, f'tr_{start}_{end}.parquet')
-
-    if os.path.exists(cache_path) and not force:
-        return pd.read_parquet(cache_path)
+    cache_path = _cache_path('tr', start, end)
+    cached = _load_cache_window('tr', 'trading restriction', start, end, force)
+    if cached is not None:
+        return cached
 
     days = get_trading_days(start, end)
     dfs = []
@@ -254,7 +316,10 @@ class DataHub:
         self._tr = None
         self._universe = None
         self._force = force
-        self._use_mock = use_mock or os.environ.get('AUTOALPHA_MOCK') == '1'
+        self._use_mock = use_mock or (
+            os.environ.get("AUTOALPHA_MOCK") == "1"
+            or os.environ.get("ALPHACLAW_MOCK") == "1"
+        )
 
     @property
     def pv_15m(self):

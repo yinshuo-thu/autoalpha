@@ -5,6 +5,7 @@ import yaml
 import pandas as pd
 from core.genalpha import GenAlpha
 from core.datahub import get_trading_days, load_pv_days, load_universe, load_resp_days, load_restriction_days
+from paths import OUTPUTS_ROOT, PROJECT_ROOT
 
 class BatchRunner:
     @staticmethod
@@ -118,12 +119,12 @@ class BatchRunner:
             df_res.index.name = 'run_id'
             
             # 1. Update overall batch summary
-            summary_path = r"e:\Scientech\outputs\research_runs\batch_summary.csv"
+            summary_path = os.path.join(OUTPUTS_ROOT, "research_runs", "batch_summary.csv")
             os.makedirs(os.path.dirname(summary_path), exist_ok=True)
             df_res.to_csv(summary_path)
             
             # 2. Output dedicated Leaderboard (Sorted by Score descending)
-            leaderboard_path = r"e:\Scientech\outputs\research_runs\leaderboard.csv"
+            leaderboard_path = os.path.join(OUTPUTS_ROOT, "research_runs", "leaderboard.csv")
             lb_df = df_res[['Score', 'PassGates', 'IC', 'IR', 'Turnover']].sort_values(by='Score', ascending=False)
             lb_df.to_csv(leaderboard_path)
             
@@ -131,4 +132,4 @@ class BatchRunner:
             print(lb_df.to_string())
 
 if __name__ == "__main__":
-    BatchRunner.execute_configs(configs_dir=r"e:\Scientech\research\configs", start_date="2022-01-01", end_date="2024-12-31")
+    BatchRunner.execute_configs(configs_dir=os.path.join(PROJECT_ROOT, "research", "configs"), start_date="2022-01-01", end_date="2024-12-31")

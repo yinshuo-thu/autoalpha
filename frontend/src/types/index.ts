@@ -1,5 +1,5 @@
 // Task status
-export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed';
+export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 // Execution phase
 export type ExecutionPhase =
@@ -21,6 +21,8 @@ export interface TaskConfig {
   useCustomMiningDirection?: boolean;
   numDirections?: number;
   maxRounds?: number;
+  /** 与 maxRounds 相乘得到 research_loop 总迭代次数（后端 max_iters） */
+  maxLoops?: number;
   librarySuffix?: string;
 
   // LLM configuration
@@ -46,6 +48,10 @@ export interface RealtimeMetrics {
   icir: number;
   rankIc: number;
   rankIcir: number;
+  score?: number;
+  turnover?: number;
+  passGatesCount?: number;
+  submissionReadyCount?: number;
   
   // Optional factor name if available (e.g. best factor)
   factorName?: string;
@@ -54,6 +60,19 @@ export interface RealtimeMetrics {
   top10Factors?: Array<{
     factorName: string;
     factorExpression: string;
+    factorDescription?: string;
+    score: number;
+    turnover: number;
+    passGates: boolean;
+    submissionReadyFlag: boolean;
+    classification?: string;
+    recommendation?: string;
+    reason?: string;
+    submissionPath?: string;
+    submissionDir?: string;
+    metadataPath?: string;
+    sanityReport?: Record<string, any>;
+    gatesDetail?: Record<string, any>;
     rankIc: number;
     rankIcir: number;
     ic: number;
@@ -102,6 +121,20 @@ export interface Factor {
   factorExpression: string;
   factorDescription: string;
   quality: FactorQuality;
+  score?: number;
+  turnover?: number;
+  passGates?: boolean;
+  submissionReadyFlag?: boolean;
+  classification?: string;
+  recommendation?: string;
+  reason?: string;
+  submissionPath?: string;
+  submissionDir?: string;
+  metadataPath?: string;
+  sanityReport?: Record<string, any>;
+  gatesDetail?: Record<string, any>;
+  scoreFormula?: string;
+  scoreComponents?: Record<string, any>;
 
   // Backtest metrics
   ic: number;
@@ -153,6 +186,12 @@ export interface Task {
   logs: LogEntry[];
   createdAt: string;
   updatedAt: string;
+  /** 后端是否配置了 LLM（仅自动挖掘流程相关） */
+  engineMeta?: { llmEnabled: boolean };
+  /** 来自 llm_mining/mining_log.jsonl 的最近记录（含 LLM 回复与批次摘要） */
+  llmMiningRecent?: Record<string, unknown>[];
+  /** 本地日志路径（便于排错） */
+  logPaths?: { researchLog?: string; llmMiningJsonl?: string };
 }
 
 // API Response

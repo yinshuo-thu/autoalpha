@@ -1,0 +1,212 @@
+{
+  "source_path": "/Volumes/T7/autoalpha_v2/autoalpha_v2/submit/autoalpha_20260422_223541_02.pq",
+  "record": {
+    "run_id": "v3v2_20260427_114258_08",
+    "formula": "neg(ts_decay_linear(cs_zscore(ts_mean(tanh(ts_pct_change(close_trade_px,4)) * min_of(clip(safe_div(close_trade_px-ts_min(low_trade_px,8),ts_max(high_trade_px,8)-ts_min(low_trade_px,8)),0,1),sigmoid(min_of(signed_log(safe_div(ts_mean(volume,4),lag(ts_mean(volume,4),4))),signed_log(safe_div(ts_mean(trade_count,4),lag(ts_mean(trade_count,4),4)))))),3)),15))",
+    "thought_process": "Imported from v2 submit candidates, then re-screened by v3 train-only 2022-2023 metrics and low-correlation gate. 2024 is report-only.",
+    "IC": 1.4000970428486408,
+    "IR": 5.966796497570662,
+    "tvr": 267.95257568359375,
+    "Turnover": 267.95257568359375,
+    "Score": 309.27565722551975,
+    "PassGates": true,
+    "correlation": {
+      "max_abs_corr": 0.6967416128781792,
+      "max_corr": 0.6967416128781792,
+      "closest_run_id": "v3v2_20260427_114258_07",
+      "compared": 2,
+      "threshold": 0.72,
+      "PassLowCorrelation": true
+    },
+    "oss_2024": {
+      "start": "2024-01-01",
+      "end": "2024-12-31",
+      "days": 242,
+      "metrics": {
+        "IC": 0.6442723156587927,
+        "IR": 1.9710250760581913,
+        "Turnover": 264.3548583984375,
+        "TurnoverLocal": 264.3548583984375,
+        "Score": 0.0,
+        "PassGates": false,
+        "maxx": 9.341496467590332,
+        "minn": -9.3268404006958,
+        "max_mean": 6.283217906951904,
+        "min_mean": -6.254544734954834,
+        "score_formula": "score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100",
+        "metric_mode": "submission_cloud_aligned",
+        "turnover_basis": "restricted_raw_alpha_diff_sum_x100",
+        "cloud_tvr_multiplier": 1.0,
+        "GatesDetail": {
+          "IC": true,
+          "IR": false,
+          "Turnover": true,
+          "Concentration": true
+        },
+        "result_preview": {
+          "IC": 0.6442723156587927,
+          "IR": 1.9710250760581913,
+          "tvr": 264.3548583984375,
+          "local_tvr": 264.3548583984375,
+          "raw_tvr": 2.6435487270355225,
+          "bl": 1.5127109289169312,
+          "bs": -0.4872889518737793,
+          "nl": 2530.40625,
+          "ns": 861.4888946280992,
+          "nt": 3391.8951446280994,
+          "nd": 242.0,
+          "maxx": 9.341496467590332,
+          "max": 6.283217906951904,
+          "minn": -9.3268404006958,
+          "min": -6.254544734954834,
+          "score": 0.0
+        }
+      },
+      "used_for_feedback": false
+    },
+    "full_2022_2024": {
+      "start": "2022-01-04",
+      "end": "2024-12-31",
+      "days": 726,
+      "metrics": {
+        "IC": 1.1478079614969947,
+        "IR": 4.256210810085994,
+        "Turnover": 266.751708984375,
+        "TurnoverLocal": 266.751708984375,
+        "Score": 209.28328598572654,
+        "PassGates": true,
+        "maxx": 9.341497421264648,
+        "minn": -9.326841354370117,
+        "max_mean": 6.316412448883057,
+        "min_mean": -6.291182518005371,
+        "score_formula": "score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100",
+        "metric_mode": "submission_cloud_aligned",
+        "turnover_basis": "restricted_raw_alpha_diff_sum_x100",
+        "cloud_tvr_multiplier": 1.0,
+        "GatesDetail": {
+          "IC": true,
+          "IR": true,
+          "Turnover": true,
+          "Concentration": true
+        },
+        "result_preview": {
+          "IC": 1.1478079614969947,
+          "IR": 4.256210810085994,
+          "tvr": 266.751708984375,
+          "local_tvr": 266.751708984375,
+          "raw_tvr": 2.6675169467926025,
+          "bl": 1.4921021461486816,
+          "bs": -0.5078977942466736,
+          "nl": 2460.1487068965516,
+          "ns": 871.1449137931035,
+          "nt": 3331.293620689655,
+          "nd": 725.0,
+          "maxx": 9.341497421264648,
+          "max": 6.316412448883057,
+          "minn": -9.326841354370117,
+          "min": -6.291182518005371,
+          "score": 209.28328598572654
+        }
+      },
+      "used_for_discovery": false
+    },
+    "period_metrics": [
+      {
+        "period": "discovery",
+        "label": "Discovery 2022-2023",
+        "start": "2022-01-01",
+        "end": "2023-12-31",
+        "days": 484,
+        "IC": 1.4000970428486408,
+        "IR": 5.966796497570662,
+        "tvr": 267.95257568359375,
+        "Turnover": 267.95257568359375,
+        "Score": 309.27565722551975,
+        "PassGates": true,
+        "used_for_discovery": true
+      },
+      {
+        "period": "oos_2024",
+        "label": "OOS 2024",
+        "start": "2024-01-01",
+        "end": "2024-12-31",
+        "days": 242,
+        "IC": 0.6442723156587927,
+        "IR": 1.9710250760581913,
+        "tvr": 264.3548583984375,
+        "Turnover": 264.3548583984375,
+        "Score": 0.0,
+        "PassGates": false,
+        "used_for_discovery": false
+      },
+      {
+        "period": "full_2022_2024",
+        "label": "Full 2022-2024",
+        "start": "2022-01-04",
+        "end": "2024-12-31",
+        "days": 726,
+        "IC": 1.1478079614969947,
+        "IR": 4.256210810085994,
+        "tvr": 266.751708984375,
+        "Turnover": 266.751708984375,
+        "Score": 209.28328598572654,
+        "PassGates": true,
+        "used_for_discovery": false
+      }
+    ],
+    "oos_comparison": {
+      "IC_delta": -0.7558247271898481,
+      "Score_delta": -309.27565722551975,
+      "IR_delta": -3.995771421512471,
+      "tvr_delta": -3.59771728515625,
+      "IC_retention": 0.4601626144056091,
+      "Score_retention": 0.0,
+      "trend": "weaker",
+      "used_for_feedback": false
+    },
+    "eval_window": {
+      "discovery_start": "2022-01-01",
+      "discovery_end": "2023-12-31",
+      "discovery_days": 484,
+      "oos_start": "2024-01-01",
+      "oos_end": "2024-12-31",
+      "oos_days": 242,
+      "oos_used_for_feedback": false,
+      "export_parquet_window": "2022-2024 full three-year panel"
+    },
+    "postprocess": "v2_import_reexport",
+    "lookback_days": 0,
+    "status": "ok",
+    "inspiration_source_type": "v2_import",
+    "inspiration_source_types": [
+      "v2_import"
+    ],
+    "generation_mode": "v3_v2_import_train_only_lowcorr",
+    "target_source": "v2_submit_revalidated",
+    "prompt_version": "v3-v2-import-oos-lowcorr-20260427",
+    "parquet_path": "/Volumes/T7/autoalpha_v3/output/v3v2_20260427_114258_08.pq",
+    "eval_days": 484,
+    "screening": {
+      "method": "v2 parquet candidate revalidation",
+      "days": 484,
+      "used_2024": false,
+      "exported_days": 726
+    },
+    "v2_source": {
+      "parquet_path": "/Volumes/T7/autoalpha_v2/autoalpha_v2/submit/autoalpha_20260422_223541_02.pq",
+      "metadata": {
+        "run_id": "autoalpha_20260422_223541_02",
+        "formula": "neg(ts_decay_linear(cs_zscore(ts_mean(tanh(ts_pct_change(close_trade_px,4)) * min_of(clip(safe_div(close_trade_px-ts_min(low_trade_px,8),ts_max(high_trade_px,8)-ts_min(low_trade_px,8)),0,1),sigmoid(min_of(signed_log(safe_div(ts_mean(volume,4),lag(ts_mean(volume,4),4))),signed_log(safe_div(ts_mean(trade_count,4),lag(ts_mean(trade_count,4),4)))))),3)),15))",
+        "Score": 209.2832859857265,
+        "IC": 1.147807961496995,
+        "IR": 4.256210810085991,
+        "tvr": 266.751708984375,
+        "PassGates": true,
+        "source_parquet_path": "/Volumes/T7/autoalpha_v2/autoalpha_v2/output/autoalpha_20260422_223541_02.pq",
+        "submit_path": "/Volumes/T7/autoalpha_v2/autoalpha_v2/submit/autoalpha_20260422_223541_02.pq",
+        "copied_at": "2026-04-22T22:52:45.278638"
+      }
+    }
+  },
+  "created_at": "2026-04-27T11:50:47.782111"
+}

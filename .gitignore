@@ -1,31 +1,116 @@
-# Data & Cache
-eq_data_stage*
-eq_resp_stage*
-eq_trading_restriction_stage*
+# AutoAlpha v3 source-control policy:
+# keep implementation files, configs, docs, and lightweight reports in Git;
+# keep local data, generated submissions, caches, credentials, model outputs,
+# and built artifacts out of Git.
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_key*
+*_secret*
+secrets/
+
+# Python environments and caches
+.venv/
+venv/
+.conda/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Node / frontend generated assets
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# Logs, process state, temporary files
+*.log
+*.pid
+*.tmp
+*.bak
+*.swp
+cloudflared*.log
+cloudflared*.pid
+frontend.pid
+server.pid
+server.public.pid
+
+# macOS / IDE artifacts
+.DS_Store
+._*
+.AppleDouble/
+.LSOverride
+.vscode/
+.idea/
+.playwright-cli/
+.claude/
+scratch/
+CLAUDE*.md
+CODEX_CHANGELOG.md
+review_*.md
+simulator_TODO_*.md
+challenge_summary.md
+draw.md
+submit.md
+summary.md
+simple diagram.png
+framework1.png
+
+# Large raw and derived data
+*.pq
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pkl
+*.joblib
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+eq_data_stage*/
+eq_resp_stage*/
+eq_trading_restriction_stage*/
 data.pq
 universe/
 cache/
-outputs/*.pq
-research_runs/*.json
-submit/**/*.pq
+数据及因子/数据及因子/数据/
+数据及因子/**/数据/
 
-# Environments
-.conda/
-.venv/
-node_modules/
+# Generated AutoAlpha runtime state
+autoalpha/
+output/
+submit/
+model_lab/
+process_logs/
+manual/artifacts/
+manual/reports/
+manual/submit/
+outputs/*.json
+outputs/research_runs/
 
-# Logs
-*.log
-
-# Pycache
-__pycache__/
-*.pyc
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Frontend
-frontend/dist/
+# Local experiments and ad-hoc scripts
+patch_*.py
+test_api_*.py
+test_feishu_push.py
+test_httpx.py
+test_requests_long.py
+test_llm_factor_gen.py

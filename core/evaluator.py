@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -152,14 +154,13 @@ def calc_turnover_submission_wide(alpha_un):
     abs_sum = df.abs().sum(axis=1)
     weights = df.div(abs_sum.replace(0, np.nan), axis=0) * 10_000
 
-    turnover_bar_bps = weights.diff().abs().sum(axis=1)
+    # Cloud-side submission evaluation is closer to turnover computed on raw alpha,
+    # not on averaged bps weights. We still keep bps weights for position stats.
+    turnover_bar = df.diff().abs().sum(axis=1) / abs_sum.replace(0, np.nan)
     date_vals = pd.to_datetime(weights.index.get_level_values('date'))
     same_day_prev = np.r_[False, date_vals[1:] == date_vals[:-1]]
-    turnover_bar_bps = turnover_bar_bps.where(same_day_prev)
-
-    # Official-like口径更接近平台结果：
-    # 先转成书面权重(bps)，再按日取“bar 平均换手”，最后除以 10 转成百分数。
-    daily_tvr = turnover_bar_bps.groupby('date').mean() / 10.0
+    turnover_bar = turnover_bar.where(same_day_prev)
+    daily_tvr = turnover_bar.groupby('date').sum()
     return daily_tvr, weights
 
 def calc_submission_position_stats_wide(weights):
@@ -175,22 +176,20 @@ def calc_submission_position_stats_wide(weights):
             'min': 0.0,
         }
 
-    long_weights = weights.where(weights > 0)
-
     long_book = weights.clip(lower=0).sum(axis=1) / 5000.0
-    short_book = (-weights.clip(upper=0)).sum(axis=1) / 5000.0
-    long_max_bar = long_weights.max(axis=1).dropna()
-    long_min_bar = long_weights.min(axis=1).dropna()
+    short_book = weights.clip(upper=0).sum(axis=1) / 5000.0
+    max_bar = weights.max(axis=1).dropna()
+    min_bar = weights.min(axis=1).dropna()
 
     return {
         'bl': float(long_book.mean()) if not long_book.empty else 0.0,
         'bs': float(short_book.mean()) if not short_book.empty else 0.0,
         'nl': float((weights > 0).sum(axis=1).mean()) if not weights.empty else 0.0,
         'ns': float((weights < 0).sum(axis=1).mean()) if not weights.empty else 0.0,
-        'nt': float((weights != 0).sum(axis=1).mean()) if not weights.empty else 0.0,
+        'nt': float((weights.notna() & (weights != 0)).sum(axis=1).mean()) if not weights.empty else 0.0,
         'nd': float(pd.to_datetime(weights.index.get_level_values('date')).nunique()),
-        'max': float(long_max_bar.groupby('date').max().mean()) if not long_max_bar.empty else 0.0,
-        'min': float(long_min_bar.groupby('date').min().mean()) if not long_min_bar.empty else 0.0,
+        'max': float(max_bar.groupby('date').max().mean()) if not max_bar.empty else 0.0,
+        'min': float(min_bar.groupby('date').min().mean()) if not min_bar.empty else 0.0,
     }
 
 def calc_book_stats_wide(alpha_un):
@@ -274,28 +273,32 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
     ic_display = daily_ic.mean() * 100 if not daily_ic.empty else 0.0
     ir = calc_ir(daily_ic)
 
-    daily_tvr, weights = calc_turnover_submission_wide(alpha_sub)
-    tvr = daily_tvr.mean() if not daily_tvr.empty else 0.0
+    daily_tvr, weights = calc_turnover_submission_wide(alpha_tr_un)
+    tvr_raw = daily_tvr.mean() if not daily_tvr.empty else 0.0
+    tvr = tvr_raw * 100.0
 
-    maxx, minn, max_d, min_d = calc_book_stats_wide(alpha_sub)
+    cloud_tvr_multiplier = float(os.environ.get("AUTOALPHA_CLOUD_TVR_MULTIPLIER", "1.0") or 1.0)
+    cloud_tvr = tvr * cloud_tvr_multiplier if cloud_tvr_multiplier > 0 else tvr
+
+    maxx, minn, max_d, min_d = calc_book_stats_wide(alpha_tr_un)
     pos_stats = calc_submission_position_stats_wide(weights)
 
-    # ic_display 与导出的 IC 同量级（~1e-2）；与 score 中 (IC - 0.0005*Tvr) 一致，阈值用 0.006。
-    gate_ic = ic_display > 0.006
+    gate_ic = ic_display > 0.6
     gate_ir = ir > 2.5
-    gate_tvr = tvr < 400
+    gate_tvr = cloud_tvr < 400
     gate_conc = (maxx < 50) and (abs(minn) < 50) and (max_d < 20) and (abs(min_d) < 20)
     pass_gates = gate_ic and gate_ir and gate_tvr and gate_conc
 
     score = 0.0
     if pass_gates:
-        # 平台结果中的 IC 使用展示单位（mean daily corr * 100），不是小数原值。
-        score = max(0.0, ic_display - 0.0005 * tvr) * np.sqrt(ir) * 100
+        score = max(0.0, ic_display - 0.0005 * cloud_tvr) * np.sqrt(ir) * 100
 
     result_preview = {
         'IC': float(ic_display) if pd.notnull(ic_display) else 0.0,
         'IR': float(ir) if pd.notnull(ir) else 0.0,
-        'tvr': float(tvr) if pd.notnull(tvr) else 0.0,
+        'tvr': float(cloud_tvr) if pd.notnull(cloud_tvr) else 0.0,
+        'local_tvr': float(tvr) if pd.notnull(tvr) else 0.0,
+        'raw_tvr': float(tvr_raw) if pd.notnull(tvr_raw) else 0.0,
         'bl': float(pos_stats['bl']),
         'bs': float(pos_stats['bs']),
         'nl': float(pos_stats['nl']),
@@ -304,7 +307,7 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
         'nd': float(pos_stats['nd']),
         'maxx': float(maxx) if pd.notnull(maxx) else 0.0,
         'max': float(pos_stats['max']),
-        'minn': float(abs(minn)) if pd.notnull(minn) else 0.0,
+        'minn': float(minn) if pd.notnull(minn) else 0.0,
         'min': float(pos_stats['min']),
         'score': float(score),
     }
@@ -312,15 +315,18 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
     return {
         'IC': float(ic_display) if pd.notnull(ic_display) else 0.0,
         'IR': float(ir) if pd.notnull(ir) else 0.0,
-        'Turnover': float(tvr) if pd.notnull(tvr) else 0.0,
+        'Turnover': float(cloud_tvr) if pd.notnull(cloud_tvr) else 0.0,
+        'TurnoverLocal': float(tvr) if pd.notnull(tvr) else 0.0,
         'Score': float(score),
         'PassGates': bool(pass_gates),
         'maxx': float(maxx) if pd.notnull(maxx) else 0.0,
-        'minn': float(abs(minn)) if pd.notnull(minn) else 0.0,
+        'minn': float(minn) if pd.notnull(minn) else 0.0,
         'max_mean': float(max_d) if pd.notnull(max_d) else 0.0,
-        'min_mean': float(abs(min_d)) if pd.notnull(min_d) else 0.0,
+        'min_mean': float(min_d) if pd.notnull(min_d) else 0.0,
         'score_formula': 'score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100',
-        'metric_mode': 'submission_like',
+        'metric_mode': 'submission_cloud_aligned',
+        'turnover_basis': 'restricted_raw_alpha_diff_sum_x100',
+        'cloud_tvr_multiplier': float(cloud_tvr_multiplier),
         'GatesDetail': {
             'IC': bool(gate_ic),
             'IR': bool(gate_ir),

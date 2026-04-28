@@ -22,6 +22,7 @@ from formula_parser import parse_formula, ParseError, ast_to_string
 from formula_validator import validate_formula
 from compliance_guard import full_compliance_check
 from prepare_data import DataHub
+from core.submission import SubmissionBuilder
 
 
 def compute_formula(formula_text, data_hub):
@@ -112,11 +113,13 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
     # Run official evaluator
     try:
         metrics = Evaluator.run(alpha_aligned, resp_aligned, restriction_aligned)
+        submission_like = Evaluator.run_submission_like(alpha_aligned, resp_aligned, restriction_aligned)
     except Exception as e:
         return {'error': f'Evaluator failed: {e}'}
 
     # Flatten and map to expected format for frontend/leaderboard
     overall = metrics.get('overall', {})
+    cloud = submission_like or {}
     daily_ic = metrics.get('daily_ic', pd.Series(dtype=float))
     missing_days = len(set(data_hub.get_trading_days_list()) - set(alpha_aligned.index.get_level_values('date').unique().astype(str)))
 
@@ -137,33 +140,49 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
 
     return {
         'factor_name': factor_name,
-        'IC': overall.get('IC', 0) / 100.0,  # Scale back to decimal for consistency
+        'IC': cloud.get('IC', 0) / 100.0,
         'rank_ic': metrics.get('rank_ic', 0) / 100.0,
-        'IR': overall.get('IR', 0),
-        'Turnover': overall.get('Turnover', 0),
-        'Score': overall.get('Score', 0),
-        'score_raw': overall.get('Score', 0),
-        'ic_minus_tvr': metrics.get('ic_minus_tvr', 0) / 100.0,
+        'IR': cloud.get('IR', overall.get('IR', 0)),
+        'Turnover': cloud.get('Turnover', overall.get('Turnover', 0)),
+        'TurnoverLocal': cloud.get('TurnoverLocal', overall.get('Turnover', 0)),
+        'Score': cloud.get('Score', overall.get('Score', 0)),
+        'score_raw': cloud.get('Score', overall.get('Score', 0)),
+        'ic_minus_tvr': ((cloud.get('IC', 0) - 0.0005 * cloud.get('Turnover', 0)) / 100.0),
         'cover_all': 1 if missing_days == 0 else 0,
         'missing_days': missing_days,
-        'maxx': overall.get('maxx', 0),
-        'minn': overall.get('minn', 0),
+        'maxx': cloud.get('maxx', overall.get('maxx', 0)),
+        'minn': cloud.get('minn', overall.get('minn', 0)),
         'stability_score': metrics.get('stability_score', 0),
         'positive_ic_ratio': metrics.get('positive_ic_ratio', 0),
-        'PassGates': overall.get('PassGates', False),
-        'classification': 'Submission Ready' if overall.get('PassGates') else ('Research Candidate' if abs(overall.get('IC', 0)) > 0.1 else 'Drop'),
+        'PassGates': cloud.get('PassGates', overall.get('PassGates', False)),
+        'gates_detail': cloud.get('GatesDetail', overall.get('GatesDetail', {})),
+        'classification': 'Submission Ready' if cloud.get('PassGates') else ('Research Candidate' if abs(cloud.get('IC', 0)) > 0.1 else 'Drop'),
         'yearly': metrics.get('yearly', {}),
         'monthly_heatmap': monthly_heatmap,
         'time_series': {
             'daily_ic': daily_ic_list,
         },
+        'score_formula': 'score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100',
+        'score_components': {
+            'IC': cloud.get('IC', 0) / 100.0,
+            'Turnover': cloud.get('Turnover', overall.get('Turnover', 0)),
+            'TurnoverLocal': cloud.get('TurnoverLocal', overall.get('Turnover', 0)),
+            'IR': cloud.get('IR', overall.get('IR', 0)),
+        },
+        'official_metrics': submission_like,
+        'official_IC': submission_like.get('IC', 0),
+        'official_IR': submission_like.get('IR', 0),
+        'official_Turnover': submission_like.get('Turnover', 0),
+        'official_Score': submission_like.get('Score', 0),
     }
 
 
-def quick_test(formula_text, factor_name='quick_test', postprocess=None):
+def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothesis=None, data_hub=None):
     """
     Full quick test pipeline: parse → validate → compute → evaluate → classify.
     Returns structured JSON result.
+    hypothesis: optional AI rationale / research hypothesis (shown in Feishu metadata).
+    data_hub: optional pre-loaded DataHub instance to avoid redundant loading.
     """
     result = {'factor_name': factor_name, 'formula': formula_text, 'status': 'pending'}
 
@@ -189,7 +208,10 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None):
     # Stage 3: Load data & compute
     try:
         t0 = time.time()
-        hub = DataHub()
+        if data_hub is None:
+            hub = DataHub()
+        else:
+            hub = data_hub
         result['data_load_time'] = time.time() - t0
 
         t1 = time.time()
@@ -218,24 +240,59 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None):
         result['eval_time'] = time.time() - t2
         result['status'] = 'success'
 
-        if metrics['PassGates']:
-            result['recommendation'] = '✅ Passed gates — consider adding to research queue'
-        elif metrics['classification'] == 'Research Candidate':
-            result['recommendation'] = '🔬 Research candidate — worth further exploration'
+        trading_days = hub.get_trading_days_list()
+        sanity_report = SubmissionBuilder.pre_submit_sanity_check(
+            alpha,
+            trading_days[0],
+            trading_days[-1],
+        )
+        result['sanity_report'] = sanity_report
+        result['coverage_pass'] = bool(sanity_report.get('cover_all') == 1)
+        result['submission_ready_flag'] = bool(
+            result.get('PassGates', False) and sanity_report.get('submission_ready', False)
+        )
+
+        gate_detail = dict(result.get('gates_detail', {}))
+        gate_detail['Coverage'] = result['coverage_pass']
+        gate_detail['SubmissionFormat'] = bool(sanity_report.get('submission_ready', False))
+        result['gates_detail'] = gate_detail
+
+        if result['submission_ready_flag']:
+            result['classification'] = 'Submission Ready'
+        elif result.get('PassGates'):
+            result['classification'] = 'Research Candidate'
+            result['reason'] = 'Quality gates passed, but submission profile still needs fixing'
+
+        if result['submission_ready_flag']:
+            result['recommendation'] = '[PASS] Passed gates — consider adding to research queue'
+        elif result['classification'] == 'Research Candidate':
+            result['recommendation'] = '[CANDIDATE] Research candidate — worth further exploration'
         else:
-            result['recommendation'] = '❌ Drop — metrics too poor for submission'
+            result['recommendation'] = '[DROP] Metrics too poor for submission'
             
         import sys
         if 'outputs.export_submission' not in sys.modules:
             sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         from outputs.export_submission import export_to_parquet
+
+        desc = hypothesis or f"Quick test result for {factor_name}: {formula_text}"
         out_path = export_to_parquet(
-            alpha, 
-            factor_name, 
-            metrics=metrics, 
-            description=f"Quick test result for {factor_name}: {formula_text}"
+            alpha,
+            factor_name,
+            metrics=result,
+            description=desc,
+            sanity_report=sanity_report,
+            hypothesis=hypothesis or desc,
         )
         result['submission_path'] = out_path
+        result['submission_dir'] = os.path.dirname(out_path)
+        # metadata filename follows storage_basename inside export_to_parquet
+        import glob
+
+        meta_glob = glob.glob(os.path.join(result['submission_dir'], '*_metadata.json'))
+        result['metadata_path'] = meta_glob[0] if meta_glob else os.path.join(
+            result['submission_dir'], f'{factor_name}_metadata.json'
+        )
 
     except Exception as e:
         result['status'] = 'evaluation_failed'

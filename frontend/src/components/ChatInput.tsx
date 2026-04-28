@@ -1,16 +1,25 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, Square, Compass } from 'lucide-react';
+import { Send, Sparkles, Square, Wand2, Bot } from 'lucide-react';
 import { TaskConfig } from '@/types';
 
 interface ChatInputProps {
   onSubmit: (config: TaskConfig) => void;
+  onGenerate?: (config: TaskConfig) => void | Promise<void>;
   onStop?: () => void;
   isRunning?: boolean;
+  isGenerating?: boolean;
 }
 
-export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunning = false }) => {
+export const ChatInput: React.FC<ChatInputProps> = ({
+  onSubmit,
+  onGenerate,
+  onStop,
+  isRunning = false,
+  isGenerating = false,
+}) => {
   const [input, setInput] = useState('');
-  const [useCustomMiningDirection, setUseCustomMiningDirection] = useState(false);
+  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  const [useCustomMiningDirection] = useState(false);
   const [config] = useState<Partial<TaskConfig>>({
     librarySuffix: '',
   });
@@ -23,14 +32,20 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunnin
   ];
 
   const handleSubmit = () => {
-    if (isRunning) return;
+    if (mode === 'auto' && isRunning) return;
     const suffix = config.librarySuffix?.trim() || undefined;
-    onSubmit({
+    const payload = {
       userInput: input.trim(),
       useCustomMiningDirection,
       ...config,
       librarySuffix: suffix,
-    } as TaskConfig);
+    } as TaskConfig;
+
+    if (mode === 'manual') {
+      onGenerate?.(payload);
+      return;
+    }
+    onSubmit(payload);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -52,7 +67,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunnin
       <div className="container mx-auto px-6">
         
         {/* Example Prompts */}
-        {!input && !isRunning && (
+        {!input && !isRunning && !isGenerating && (
           <div className="flex flex-wrap justify-center gap-2 mb-3 overflow-x-auto pb-2 scrollbar-hide">
             {examplePrompts.map((prompt, idx) => (
               <button
@@ -72,26 +87,35 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunnin
           <div className="gradient-border-content">
             <div className="glass-strong rounded-xl p-4">
               {/* Icon bar: Custom mining direction etc. */}
-              <div className="flex items-center gap-1 mb-3">
-                <button
-                  type="button"
-                  onClick={() => setUseCustomMiningDirection((v) => !v)}
-                  title={useCustomMiningDirection ? '使用设置中的挖掘方向（已开）' : '使用设置中的挖掘方向（点击开启）'}
-                  className={`p-2 rounded-lg transition-all ${
-                    useCustomMiningDirection
-                      ? 'bg-primary/15 text-primary ring-1 ring-primary/30'
-                      : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
-                  }`}
-                >
-                  <Compass className="h-4 w-4" />
-                </button>
-                <span
-                  className={`text-xs ml-1 ${
-                    useCustomMiningDirection ? 'text-primary font-medium' : 'text-muted-foreground'
-                  }`}
-                >
-                  自选挖掘方向
-                </span>
+              <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMode('manual')}
+                    className={`px-3 py-1.5 rounded-lg text-sm transition-all flex items-center gap-2 ${
+                      mode === 'manual'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-secondary/40 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <Wand2 className="h-4 w-4" />
+                    指定生成
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('auto')}
+                    className={`px-3 py-1.5 rounded-lg text-sm transition-all flex items-center gap-2 ${
+                      mode === 'auto'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-secondary/40 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    <Bot className="h-4 w-4" />
+                    自动挖掘
+                  </button>
+                </div>
+
+                {/* Custom mining direction button removed per user request */}
               </div>
               <div className="flex items-end gap-3">
                 <div className="flex-1">
@@ -101,13 +125,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunnin
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={
-                      isRunning
+                      mode === 'manual'
+                        ? '输入自然语言研究想法，或直接输入 DSL 公式；点击后会生成并验证一个可提交因子'
+                        : isRunning
                         ? '实验运行中...可以切换到其他页面，任务不会中断'
-                        : useCustomMiningDirection
-                        ? '已开启自选挖掘方向，将使用「设置 → 挖掘方向」中的选项'
-                        : '描述因子挖掘需求，或开启「自选挖掘方向」使用设置中的方向 (Shift+Enter 换行，Enter 发送)'
+                        : '可以不输入文字自动挖掘，也可描述因子挖掘需求 (Shift+Enter 换行，Enter 发送)'
                     }
-                    disabled={isRunning}
+                    disabled={isRunning || isGenerating}
                     className="w-full bg-transparent text-base placeholder:text-muted-foreground focus:outline-none resize-none"
                     rows={1}
                     style={{ maxHeight: '120px' }}
@@ -126,11 +150,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSubmit, onStop, isRunnin
                   ) : (
                     <button
                       onClick={handleSubmit}
-                      disabled={isRunning}
+                      disabled={isRunning || isGenerating || (!input.trim() && mode === 'manual')}
                       className="p-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-105 active:scale-95"
-                      title="发送 (Enter)"
+                      title={mode === 'manual' ? '生成并验证' : '启动自动挖掘'}
                     >
-                      <Send className="h-5 w-5" />
+                      {isGenerating ? (
+                        <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      ) : (
+                        <Send className="h-5 w-5" />
+                      )}
                     </button>
                   )}
                 </div>

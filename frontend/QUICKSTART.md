@@ -1,4 +1,4 @@
-# QuantaAlpha Web Dashboard - 快速开始指南
+# AutoAlpha Web Dashboard - 快速开始指南
 
 ## 🎯 项目概览
 
@@ -29,14 +29,14 @@
 │  │       FastAPI 后端 (localhost:8000)              │  │
 │  │  - REST API (任务管理、因子库读取)               │  │
 │  │  - WebSocket (实时日志/进度推送)                  │  │
-│  │  - 子进程调用 quantaalpha CLI                    │  │
+│  │  - 子进程调用项目根目录 research_loop / 评测脚本   │  │
 │  └──────────────────────────────────────────────────┘  │
 │            ↕ subprocess                                  │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │        QuantaAlpha 核心 (quantaalpha CLI)        │  │
-│  │  - 因子挖掘 (quantaalpha mine)                   │  │
-│  │  - 独立回测 (quantaalpha.backtest.run_backtest)  │  │
-│  │  - 因子库 (all_factors_library*.json)            │  │
+│  │        AutoAlpha 核心（本仓库 Python 模块）       │  │
+│  │  - 因子挖掘 (research_loop / LLM 思路生成)        │  │
+│  │  - 评测与回测 (evaluate_alpha / simulate 等)    │  │
+│  │  - 因子库 (leaderboard.json 等)                   │  │
 │  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -52,7 +52,7 @@
 ### 方法 1: 一键启动（推荐）
 
 ```bash
-conda activate quantaalpha   # 或你的 conda 环境名
+conda activate autoalpha   # 或你的 conda 环境名
 cd frontend-v2
 bash start.sh
 ```
@@ -68,7 +68,7 @@ bash start.sh
 
 **终端 1 - 后端:**
 ```bash
-conda activate quantaalpha
+conda activate autoalpha
 cd frontend-v2
 pip install -r backend/requirements.txt
 python backend/app.py
@@ -205,4 +205,4 @@ frontend-v2/
 
 ---
 
-Made with ❤️ by QuantaAlpha Team
+Made with ❤️ by AutoAlpha

@@ -1,3 +1,5 @@
+import { getAutoAlphaConfigRaw } from '@/utils/autoalphaStorage';
+
 /**
  * Reference mining directions list and default direction parsing (consistent with "Mining Direction" in settings)
  * Each direction can attach up to 3 factors' "short name", "expression", "meaning", displayed on hover
@@ -54,7 +56,7 @@ interface StoredMiningDirectionConfig {
 /** Get a default mining direction from saved config (one of the selected list, or a random one) */
 export function getDefaultMiningDirection(): string {
   try {
-    const raw = localStorage.getItem('quantaalpha_config');
+    const raw = getAutoAlphaConfigRaw();
     if (!raw) return '';
     const config = JSON.parse(raw) as StoredMiningDirectionConfig;
     const indices = config?.selectedMiningDirectionIndices ?? [];

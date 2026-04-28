@@ -54,7 +54,7 @@ class Tokenizer:
     """Tokenize a formula string into tokens."""
 
     TOKEN_SPEC = [
-        ('NUMBER',   r'-?\d+\.?\d*'),
+        ('NUMBER',   r'\d+\.?\d*'),
         ('IDENT',    r'[a-zA-Z_][a-zA-Z0-9_]*'),
         ('LPAREN',   r'\('),
         ('RPAREN',   r'\)'),
