@@ -39,6 +39,18 @@ interface KbFactor {
   research_path?: string;
   factor_card_path?: string;
   parent_run_ids?: string[];
+  oss_2024?: {
+    days?: number;
+    used_for_feedback?: boolean;
+    metrics?: {
+      PassGates?: boolean;
+      Score?: number;
+      IC?: number;
+      IR?: number;
+      Turnover?: number;
+      tvr?: number;
+    };
+  };
   live_submitted?: boolean;
   live_test_result?: {
     raw?: string;
@@ -1724,6 +1736,15 @@ export const AutoAlphaPage: React.FC = () => {
     knowledge?.total_passing ?? 0,
     factors.filter((factor) => factor.PassGates).length
   );
+  const oosGateStats = useMemo(() => {
+    const withOosMetrics = factors.filter((factor) => factor.oss_2024?.metrics);
+    const passing = withOosMetrics.filter((factor) => Boolean(factor.oss_2024?.metrics?.PassGates)).length;
+    return {
+      passing,
+      total: withOosMetrics.length,
+      passRate: withOosMetrics.length ? (passing / withOosMetrics.length) * 100 : 0,
+    };
+  }, [factors]);
   const suggestedTargetValid = useMemo(
     () => suggestTargetValid(currentPassingCount),
     [currentPassingCount]
@@ -1977,9 +1998,10 @@ export const AutoAlphaPage: React.FC = () => {
         )}
         className="overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_32%),radial-gradient(circle_at_top_right,rgba(16,185,129,0.16),transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.95),rgba(248,250,252,0.92))]"
       >
-        <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-5">
           <StatCard label="已测试因子" value={String(status?.total_tested ?? 0)} helper="累计知识库记录" />
           <StatCard label="通过 Gate" value={String(status?.total_passing ?? 0)} helper={`通过率 ${formatPercent(knowledge?.pass_rate ?? 0)}`} accent="bg-emerald-50" />
+          <StatCard label="通过 OOS Gate" value={String(oosGateStats.passing)} helper={`${oosGateStats.total} 个有 2024 OOS / ${formatPercent(oosGateStats.passRate)}`} accent="bg-teal-50" />
           <StatCard label="最佳 Score" value={formatNumber(status?.best_score ?? 0, 2)} helper="按云端一致口径显示" accent="bg-sky-50" />
           <StatCard label="Ideas" value={String(inspirations?.count ?? 0)} helper="Manual / Paper / LLM" accent="bg-violet-50" />
         </div>
