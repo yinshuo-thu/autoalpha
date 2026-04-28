@@ -4,7 +4,7 @@
 
 AutoAlpha v3 is an AI-assisted intraday alpha research factory for the Scientech Labs Equity Alpha Research workflow. It is not only a combo-result dashboard: the core of the project is a closed-loop factor mining system that turns research hypotheses into DSL formulas, validates them, evaluates them on 15-minute data, stores the research memory, and then studies single-factor and multi-factor OOS behavior.
 
-The server-hosted display frontend is available at [https://autoalpha.cn/v3](https://autoalpha.cn/v3). This website is a public showcase frontend deployed on a server. It does not provide raw parquet downloads, but it does expose the full mining process, factor ideas, factor records, generation history, RAG context, and combo-lab summaries through compact snapshots.
+The display frontend is currently used for local testing, live-trading style internal checks, and migration experiments on futures data. It is not publicly released for now.
 
 ## Research Goal
 
@@ -22,7 +22,7 @@ The current implementation focuses on:
 - saving passing and failing attempts into a knowledge base for later retrieval;
 - using RAG and generation experience to steer the next mining rounds;
 - combining mined factors with rank-based ensembles and ML meta-models under chronological train/validation/OOS splits;
-- serving a compact, read-only public frontend without exposing private raw data.
+- serving a compact, read-only internal frontend for research review without exposing private raw data.
 
 ## End-to-End Mining Loop
 
@@ -73,7 +73,7 @@ The project also documents planned RAG upgrades in `docs/rag/RAG_TODO.md`, inclu
 
 ## Compact Display Architecture
 
-Raw parquet files and local databases are large and private, so the public site uses a compact deployment design.
+Raw parquet files and local databases are large and private, so the internal display frontend uses a compact deployment design.
 
 - The full research workspace lives at `/Volumes/T7/autoalpha_v3`.
 - The display deployment lives at `/Volumes/T7/autoalpha_v3_display`.
@@ -81,7 +81,7 @@ Raw parquet files and local databases are large and private, so the public site 
 - The display server serves built frontend assets and read-only JSON snapshots.
 - Mutating endpoints are disabled in display mode.
 
-This is why [https://autoalpha.cn/v3](https://autoalpha.cn/v3) should be described as a deployed showcase frontend, not as a raw-data download portal. The website is meant to let visitors inspect the mining process and factor research logic without exposing original parquet data.
+The display layer is intended for local/internal review of the mining process, factor research logic, live-trading style checks, and futures migration experiments. It is not described as a public portal at this stage.
 
 ## Current Mining Results
 
@@ -152,7 +152,7 @@ Fusion weights are selected from Train/Val metrics and frozen output correlation
 - Model Fusion Lab with stacking/blending candidates and a 25-model output-correlation heatmap.
 - OOS long-short and long-only PnL / Max DD diagnostics.
 - React + Recharts frontend for mining progress, factor records, inspirations, RAG roadmap, and combo cards.
-- Display-only Flask server for compact, public-safe JSON snapshots and static assets.
+- Display-only Flask server for compact, internal-review JSON snapshots and static assets.
 
 ## Repository Layout
 
@@ -235,7 +235,7 @@ cd /Volumes/T7/autoalpha_v3_display
 The display server is read-only and serves:
 
 - Local display: `http://127.0.0.1:8080/v3/`
-- Public display frontend: `https://autoalpha.cn/v3`
+- Public access: not released for now.
 
 ## Running Research Jobs
 
