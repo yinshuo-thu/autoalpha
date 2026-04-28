@@ -94,6 +94,8 @@ universe/
 cache/
 数据及因子/数据及因子/数据/
 数据及因子/**/数据/
+examples/legacy_factor_research/数据及因子/数据及因子/数据/
+examples/legacy_factor_research/数据及因子/**/数据/
 
 # Generated AutoAlpha runtime state
 autoalpha/
@@ -106,6 +108,9 @@ manual/reports/
 manual/submit/
 outputs/*.json
 outputs/research_runs/
+generation_notes/
+summaries/
+research/autoalpha_*/
 
 # Local experiments and ad-hoc scripts
 patch_*.py

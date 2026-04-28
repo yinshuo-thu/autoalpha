@@ -1,20 +1,20 @@
-# Auto Alpha Research Factory v2
+# Auto Alpha Research Factory v3
 
 [English](README.en.md) | [中文](README.zh-CN.md) | [Language Index](README.md)
 
-This is a clean code-only copy for restarting AutoAlpha from scratch. Runtime
+This is a clean code-only copy for restarting AutoAlpha v3 from scratch. Runtime
 state and generated artifacts are intentionally excluded: no `knowledge.json`,
 no parquet outputs, no research reports, no submit files, no model cache, and no
 local database.
 
-![Auto Alpha Research Factory v2](v2.png)
+![Auto Alpha Research Factory v3](assets/images/v2.png)
 
 AutoAlpha is the factor research pipeline used in this workspace. It generates
 intraday alpha ideas, validates formulas, computes 15-minute alpha files,
 evaluates them with an official-like metric implementation, and keeps a
 knowledge base plus submit-ready artifacts for factors that pass all gates.
 
-## v2 Technical Idea
+## v3 Technical Idea
 
 AutoAlpha v3 is a closed-loop intraday factor factory. The core idea is to let
 agents continuously propose compact DSL formulas, then force every formula
@@ -38,13 +38,13 @@ readiness**:
   ideas, while promising ideas are recomputed on the full available period.
 - `core.evaluator.evaluate_submission_like_wide` is the single source of truth
   for IC, IR, turnover, concentration, coverage, gate flags, and score.
-- Only factors that pass all gates are copied into `autoalpha_v3/submit` and shown
+- Only factors that pass all gates are copied into `submit/` and shown
   as submit-ready card links in the research UI.
 - Passing factors become parents and examples for later agents through
   `knowledge.json`, structural fingerprints, operator-pair memory, and the
   frontend records page.
 
-In practice v2 behaves like an autonomous research desk: agents create
+In practice v3 behaves like an autonomous research desk: agents create
 hypotheses, the platform-grade evaluator acts as a hard reviewer, and the
 knowledge layer remembers both productive motifs and exhausted formula families.
 
@@ -60,18 +60,18 @@ auditable, source-attributed, and submit-ready.
 
 | Area | v0 root workflow | AutoAlpha v3 |
 |------|------------------|--------------|
-| Research mode | Script-oriented experiments: `research_loop.py`, `evaluate_alpha.py`, manual configs, leaderboard updates. | Productized loop: `autoalpha_v3/run.py` / `loop.py` generate, screen, export, report, notify, and persist every result. |
+| Research mode | Script-oriented experiments: `research_loop.py`, `evaluate_alpha.py`, manual configs, leaderboard updates. | Productized loop: `run.py` / `loop.py` generate, screen, export, report, notify, and persist every result. |
 | Metric alignment | Useful local metrics existed, but older exports could diverge from platform assumptions. | Official-like 15-minute evaluator, post-restriction metrics, corrected TVR, concentration gates, and full-grid parquet checks are mandatory. |
-| Artifact policy | Many exploratory outputs live under `outputs/`, `research/`, `submit/`, and manual reports. | Passing factors get canonical `.pq`, metadata, official-like result JSON, report, and factor card under `autoalpha_v3/submit` and `autoalpha_v3/research`. |
+| Artifact policy | Many exploratory outputs live under `outputs/`, `research/`, `submit/`, and manual reports. | Passing factors get canonical `.pq`, metadata, official-like result JSON, report, and factor card under `submit/` and `research/`. |
 | Knowledge memory | Leaderboard and logs guide later iterations informally. | `knowledge.json` stores every tested factor, failure reason, parent lineage, fingerprints, card paths, lab-test results, and generation summaries. |
 | Agent feedback | Top formulas can be reused, but failure families are less explicit. | LLM prompts receive strong examples, recent weak examples, productive operator pairs, and saturated structural families. |
-| Inspiration sources | Prompting is mostly ad hoc or tied to one script run. | Paper, LLM brainstorms, and local `fut_feat/*.md` futures-factor notes are synced into one inspiration database and attributed to generated factors. |
+| Inspiration sources | Prompting is mostly ad hoc or tied to one script run. | Paper notes, LLM brainstorms, manual prompts, and archived reference factors are synced into one inspiration database and attributed to generated factors. |
 | Frontend | General dashboard/backend integration. | Dedicated AutoAlpha cockpit: quota/status, prompt lab, rolling model lab, generation records, submit-card links, inspiration database, and source-conversion charts. |
-| Submission safety | Submission helpers exist but can be called independently. | Submit readiness is a gate-controlled state; only `PassGates=true` factors are copied to `autoalpha_v3/submit` and rendered with factor cards. |
+| Submission safety | Submission helpers exist but can be called independently. | Submit readiness is a gate-controlled state; only `PassGates=true` factors are copied to `submit/` and rendered with factor cards. |
 
-## What v2 Keeps From v1
+## What v3 Keeps From Earlier Work
 
-The v2 branch keeps the v1 factor export and metric calculation alignment with the platform
+This branch keeps the factor export and metric calculation alignment with the platform
 rules:
 
 - Alpha parquet export now normalizes `date`, `datetime`, and `security_id`
@@ -93,13 +93,13 @@ rules:
   `score = (IC - 0.0005 * tvr) * sqrt(IR) * 100`.
 
 The known alignment references are the repaired factors under
-`autoalpha_v3/output/debug` and the manual submit result JSON files in
+`output/debug` and the manual submit result JSON files in
 `manual/submit` and `submit`.
 
 ## Directory Layout
 
 ```text
-autoalpha_v3/
+.
 ├── llm_client.py              # LLM idea generation
 ├── pipeline.py                # generate -> validate -> compute -> evaluate -> export
 ├── run.py                     # CLI entry point for new factor generation
@@ -131,10 +131,10 @@ cd /Volumes/T7/autoalpha_v3
 ./start_all.sh --reuse
 
 # Generate new factors on the full available evaluation period.
-python autoalpha_v3/run.py --n 3
+python run.py --n 3
 
 # Generate with a shorter evaluation window for faster iteration.
-python autoalpha_v3/run.py --n 3 --days 120
+python run.py --n 3 --days 120
 ```
 
 The launcher starts:
@@ -163,7 +163,7 @@ command that started them. Logs are written to `~/Library/Logs/Scientech`.
 7. `factor_research.analyze_factor` builds a research report. If and only if the
    factor passes all submit gates, it also writes `factor_card.json` and
    `factor_card.md`.
-8. Passing factors are copied to `autoalpha_v3/submit` with metadata and an
+8. Passing factors are copied to `submit/` with metadata and an
    official-like result JSON; their `run_id` becomes a clickable card link in
    the research records table.
 
@@ -177,7 +177,7 @@ card library focused on candidates that can actually be submitted.
 Each card is stored beside the factor report:
 
 ```text
-autoalpha_v3/research/<run_id>/
+research/<run_id>/
 ├── report.json
 ├── report.md
 ├── analysis.png
@@ -314,26 +314,26 @@ old `knowledge.json` values:
 
 ```bash
 # Recompute only factors that previously had PassGates=true.
-python autoalpha_v3/recompute_gate_factors.py
+python recompute_gate_factors.py
 
 # Faster: keep existing research reports and only refresh pq + metrics.
-python autoalpha_v3/recompute_gate_factors.py --skip-research
+python recompute_gate_factors.py --skip-research
 
 # Recompute every factor in knowledge.json.
-python autoalpha_v3/recompute_gate_factors.py --all --skip-research
+python recompute_gate_factors.py --all --skip-research
 ```
 
 The script:
 
-- backs up `autoalpha_v3/knowledge.json`;
-- archives the previous `autoalpha_v3/submit` contents;
+- backs up `knowledge.json`;
+- archives the previous `submit/` contents;
 - recomputes each formula from source data;
-- regenerates `autoalpha_v3/output/<run_id>.pq`;
+- regenerates `output/<run_id>.pq`;
 - refreshes `knowledge.json` metrics and gate fields;
-- copies only still-passing factors into `autoalpha_v3/submit`;
-- writes a batch summary under `autoalpha_v3/recompute_reports`.
+- copies only still-passing factors into `submit/`;
+- writes a batch summary under `recompute_reports/`.
 
-Submit-ready factors are the `.pq` files directly under `autoalpha_v3/submit`.
+Submit-ready factors are the `.pq` files directly under `submit/`.
 Each has a sibling metadata JSON and official-like result JSON that records the
 exact metrics used by the UI.
 
@@ -352,7 +352,7 @@ knowledge base and displayed separately from local official-like metrics.
 
 ## Frontend
 
-The v2 records page adds source-conversion charts for Paper / LLM / Future
+The v3 records page adds source-conversion charts for Paper / LLM / Future
 inspirations: source count, passing factor count, pass rate, valid factors per
 prompt, and each source's share of all valid factors.
 
@@ -360,13 +360,13 @@ prompt, and each source's share of all valid factors.
 
 ```bash
 # Check Python syntax for the recompute script.
-python -m py_compile autoalpha_v3/recompute_gate_factors.py
+python -m py_compile recompute_gate_factors.py
 
 # Build the frontend.
 npm --prefix frontend run build
 
 # Inspect current submit candidates.
-find autoalpha_v3/submit -maxdepth 1 -name '*.pq' -print
+find submit/ -maxdepth 1 -name '*.pq' -print
 
 # Start services after a recompute.
 ./start_all.sh

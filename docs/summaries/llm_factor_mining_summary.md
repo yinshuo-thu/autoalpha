@@ -1,6 +1,6 @@
 # LLM 因子挖掘现状总结
 
-![AutoAlpha 双层研究框架主图](../framework2.png)
+![AutoAlpha 双层研究框架主图](../../assets/images/framework2.png)
 
 本文基于仓库当前代码、`leaderboard.json`、`llm_mining/mining_log.jsonl` 与现有提交产物整理，关注的核心不是比赛规则本身，而是“LLM 在这个项目里到底怎样参与因子挖掘”“当前生成逻辑和数学基础是什么”“链路已经落到什么程度”。文中的“当前”特指 2026 年 4 月 10 日这个时间点可观察到的实现与运行状态。
 

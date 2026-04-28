@@ -20,7 +20,7 @@ export interface DevRagExecutionStep {
 export const devRagMeta = {
   title: 'AutoAlpha v3 RAG 改进路线图',
   subtitle: '把后端仓库里的 RAG 改进待办同步到 DEV 页面，方便前后端一起对齐当前问题、落地顺序和收益预期。',
-  source: 'autoalpha_v3/RAG_TODO.md',
+  source: 'docs/rag/RAG_TODO.md',
   updatedAt: '2026-04-23',
 };
 

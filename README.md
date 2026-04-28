@@ -1,6 +1,6 @@
 # AutoAlpha v3
 
-![AutoAlpha v3 research cockpit](autoalpha_v3/v3.png)
+![AutoAlpha v3 research cockpit](assets/images/v2.png)
 
 AutoAlpha v3 is an AI-assisted intraday alpha research factory for the Scientech Labs Equity Alpha Research workflow. It is not only a combo-result dashboard: the core of the project is a closed-loop factor mining system that turns research hypotheses into DSL formulas, validates them, evaluates them on 15-minute data, stores the research memory, and then studies single-factor and multi-factor OOS behavior.
 
@@ -26,14 +26,14 @@ The current implementation focuses on:
 
 ## End-to-End Mining Loop
 
-The v2 loop is designed as a research factory rather than a single model call.
+The v3 loop is designed as a research factory rather than a single model call.
 
 1. **Inspiration intake**
-   - Manual factor prompts, notes under `manual/`, futures/market microstructure notes under `fut_feat/`, and prior successful factors are converted into structured inspiration records.
+   - Manual factor prompts, notes under `manual/`, archived reference implementations under `examples/legacy_factor_research/`, and prior successful factors are converted into structured inspiration records.
    - Each inspiration can be summarized, tagged, sampled, and later tied back to generated factors.
 
 2. **Hypothesis and formula generation**
-   - `autoalpha_v3/llm_client.py`, `autoalpha_v3/pipeline.py`, and `autoalpha_v3/loop.py` generate research hypotheses and DSL formulas.
+   - `llm_client.py`, `pipeline.py`, and `loop.py` generate research hypotheses and DSL formulas.
    - Prompts include the target metric, allowed fields/operators, known good structures, failure feedback, and selected RAG context.
 
 3. **DSL parsing and structural control**
@@ -49,11 +49,11 @@ The v2 loop is designed as a research factory rather than a single model call.
    - Factors that pass gates are copied to submit-ready outputs; runtime parquet files remain outside Git.
 
 6. **Memory update**
-   - `autoalpha_v3/knowledge_base.py` records formula, metrics, generation, parents, inspiration IDs, structural fingerprint, status, and research paths.
+   - `knowledge_base.py` records formula, metrics, generation, parents, inspiration IDs, structural fingerprint, status, and research paths.
    - Passing factors become future RAG anchors; failed families can be down-weighted or treated as exhausted.
 
 7. **Model and combo lab**
-   - `autoalpha_v3/rolling_model_lab.py` studies chronological OOS behavior, low-correlation factor subsets, rank ensembles, and ML meta-models.
+   - `rolling_model_lab.py` studies chronological OOS behavior, low-correlation factor subsets, rank ensembles, and ML meta-models.
    - Results are exported as compact JSON summaries for the frontend and full runtime artifacts for local research.
 
 ## RAG And Research Memory
@@ -64,12 +64,12 @@ Current memory sources include:
 
 - passing factor records with formula, score, IC, IR, TVR, generation, parent IDs, and thought process;
 - failed or exhausted structural families through formula fingerprints;
-- recent generation summaries under `autoalpha_v3/generation_notes/`;
+- recent archived generation summaries under `docs/notes/generation/`;
 - inspiration records from manual prompts and imported notes;
 - leaderboard-style top factors used as strong anchors;
 - combo-lab summaries used to understand factor complementarity and redundancy.
 
-The project also documents planned RAG upgrades in `autoalpha_v3/RAG_TODO.md`, including semantic retrieval for passing factors, dynamic inspiration quality feedback, finer-grained structural fingerprints, historical experience retrieval, and Stage-1 hypothesis outcome feedback.
+The project also documents planned RAG upgrades in `docs/rag/RAG_TODO.md`, including semantic retrieval for passing factors, dynamic inspiration quality feedback, finer-grained structural fingerprints, historical experience retrieval, and Stage-1 hypothesis outcome feedback.
 
 ## Compact Display Architecture
 
@@ -158,23 +158,22 @@ Fusion weights are selected from Train/Val metrics and frozen output correlation
 
 ```text
 .
-├── autoalpha_v3/              # AutoAlpha v3 research package and runtime state
-│   ├── loop.py                # closed-loop factor mining orchestration
-│   ├── pipeline.py            # idea -> formula -> evaluate workflow
-│   ├── llm_client.py          # LLM routing and prompt construction
-│   ├── knowledge_base.py      # factor KB, RAG context, fingerprints
-│   ├── inspiration_db.py      # inspiration/prompt database utilities
-│   ├── rolling_model_lab.py   # OOS combo lab and ML/meta-model experiments
-│   ├── RAG_TODO.md            # RAG improvement roadmap
-│   └── v2.png                 # README hero image
 ├── core/                      # data loading, evaluator, submission utilities
 ├── factors/                   # factor formula library and prompts
 ├── frontend/                  # React/Vite dashboard
-├── fut_feat/                  # imported factor inspiration notes
-├── manual/                    # manual prompt/research artifacts
-├── research/                  # notebooks/configs/research notes
-├── scripts/                   # maintenance and snapshot helper scripts
+├── manual/                    # manual factor prompts and helper scripts
+├── research/                  # configs, research helpers, lightweight run snapshots
+│   └── runs/                  # archived factor-card/report snapshots
+├── scripts/                   # maintenance, mining, and snapshot helpers
+├── deploy/                    # display deployment utilities
+├── docs/                      # requirements, RAG roadmap, notes, summaries
+├── assets/images/             # README and documentation images
+├── examples/legacy_factor_research/
+│   └── 数据及因子/             # legacy/reference factor implementations
 ├── server.py                  # live Flask API + frontend server
+├── loop.py                    # closed-loop factor mining orchestration
+├── pipeline.py                # idea -> formula -> evaluate workflow
+├── rolling_model_lab.py       # OOS combo lab and ML/meta-model experiments
 ├── runtime_config.py          # runtime config loader/saver
 ├── prepare_data.py            # data hub and raw-data alignment entrypoint
 └── requirements.txt           # Python dependency baseline
@@ -243,13 +242,13 @@ The display server is read-only and serves:
 Closed-loop mining:
 
 ```bash
-PYTHONPATH=/Volumes/T7/autoalpha_v3 python -m autoalpha_v3.run
+python run.py
 ```
 
 Full-factor combo lab:
 
 ```bash
-PYTHONPATH=/Volumes/T7/autoalpha_v3 python -m autoalpha_v3.rolling_model_lab \
+python rolling_model_lab.py \
   --target-valid 96 \
   --ideas-per-round 0 \
   --max-rounds 0 \
@@ -259,11 +258,11 @@ PYTHONPATH=/Volumes/T7/autoalpha_v3 python -m autoalpha_v3.rolling_model_lab \
 Low-correlation 8-factor lab:
 
 ```bash
-PYTHONPATH=/Volumes/T7/autoalpha_v3 python -m autoalpha_v3.rolling_model_lab \
+python rolling_model_lab.py \
   --run-low-corr-experiment
 ```
 
-The lab exports compact summaries under `autoalpha_v3/model_lab/` and submit-ready outputs under `autoalpha_v3/submit/`. These runtime artifacts are excluded from source control.
+The lab exports compact summaries under `model_lab/` and submit-ready outputs under `submit/`. These runtime artifacts are excluded from source control.
 
 ## Frontend Notes
 
