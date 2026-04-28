@@ -83,60 +83,118 @@ Raw parquet files and local databases are large and private, so the internal dis
 
 The display layer is intended for local/internal review of the mining process, factor research logic, live-trading style checks, and futures migration experiments. It is not described as a public portal at this stage.
 
+## Data Basis
+
+The current v3 stock results use real, processed A-share intraday data covering
+`2022-01-04` to `2024-12-31`. The mining pipeline resamples the original
+1-minute panel to 15-minute bars, keeps `resp` and `trading_restriction` as
+evaluation-only fields, and never uses 2024 labels for factor or model
+selection.
+
+| Data slice | Period | Trading days | Rows | Securities | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| Discovery / in-sample | 2022-01-04 to 2023-12-29 | 484 | 42.40M | 5,183 | Used for factor discovery, gates, model training, and validation. |
+| OOS verification | 2024-01-02 to 2024-12-31 | 242 | 22.20M | 5,170 | Held out for overfit checks and model OOS reporting. |
+| Full processed panel | 2022-01-04 to 2024-12-31 | 726 | 64.60M | 5,260 | 15-minute OHLCV-style A-share panel with 15 columns. |
+
+Local storage scale from the current machine:
+
+- `/Volumes/T7/data`: about `107G`, including raw competition-style parquet and cache files.
+- `/Volumes/T7/data/cache`: about `6.0G`.
+- Full 2022-2024 processed cache (`pv_15m`, `resp`, `trading_restriction`):
+  about `4.34 GiB` compressed parquet on disk and `4.70 GiB` parquet logical
+  uncompressed size.
+- The duplicated 2024 OOS cache is about `1.49 GiB` compressed parquet on disk.
+
 ## Current Mining Results
 
-As of the latest local snapshot on 2026-04-26:
+As of the latest local snapshot from `knowledge.json` updated at
+`2026-04-28T18:05:19`:
 
 | Area | Result |
 | --- | ---: |
-| Total tested factor records | 1,998 |
-| Passing factors in AutoAlpha KB | 96 |
-| Main generations with passing factors | generation 7 to 17 |
-| Best single-factor Score | 209.28 |
-| Best single-factor IC | 1.1478 |
-| Best single-factor IR | 4.2562 |
-| Best single-factor TVR | 266.75 |
+| Total tested factor records | 176 |
+| In-sample passing factors | 16 |
+| Factors with recorded 2024 OOS metrics | 17 |
+| Factors passing both in-sample and 2024 OOS gates | 7 |
+| Passing generations | generation 0 to 1 |
+| Best in-sample single-factor Score | 570.95 |
+| Best 2024 OOS single-factor Score | 479.83 |
 
-Representative top single factor:
+Single-factor mining is evaluated in two stages:
+
+1. **Discovery / in-sample:** 2022-2023 data is used to screen formulas and
+   decide whether a factor passes the official-like gates.
+2. **OOS overfit check:** 2024 is then evaluated as a held-out year. These
+   metrics are recorded for review and frontend display, but `oos_used_for_feedback`
+   is `false`, so 2024 is not used to fit weights, select formulas, or steer
+   the next factor-generation prompt.
+
+Representative factors from the current snapshot:
+
+| Factor | IS Score | IS IC | IS IR | IS TVR | 2024 OOS Score | OOS IC | OOS IR | OOS TVR | OOS Gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `v3sys_20260427_103145_01` | 570.95 | 2.2586 | 6.5275 | 47.65 | 471.91 | 2.1955 | 4.7166 | 45.20 | Pass |
+| `v3sys_20260427_111852_05` | 550.52 | 2.1664 | 6.5621 | 34.67 | 479.83 | 2.1860 | 4.8931 | 33.70 | Pass |
+| `v3sys_20260427_103145_02` | 474.01 | 1.8938 | 7.0912 | 227.44 | 317.83 | 1.5299 | 5.0484 | 230.67 | Pass |
+| `v3v2_20260427_114258_08` | 309.28 | 1.4001 | 5.9668 | 267.95 | 0.00 | 0.6443 | 1.9710 | 264.35 | Fail |
 
 ```text
-autoalpha_20260422_223541_02
-Score 209.28 | IC 1.1478 | IR 4.2562 | TVR 266.75
+v3sys_20260427_103145_01
+formula: cs_rank(-1 * (ts_ema(close_trade_px,12)/ts_ema(close_trade_px,48) - 1))
+IS:  Score 570.95 | IC 2.2586 | IR 6.5275 | TVR 47.65
+OOS: Score 471.91 | IC 2.1955 | IR 4.7166 | TVR 45.20
 ```
 
-Research interpretation: a short-horizon continuation signal that requires positive 4-bar price movement, recent range location near the high, and participation expansion confirmed by both volume and trade count. The outer decay is used to reduce turnover while preserving intraday persistence.
+The fourth row illustrates why the OOS split matters: a factor can pass the
+2022-2023 discovery gates but fail the 2024 held-out IR gate, which flags a
+possible overfit or period-specific structure.
 
 ## Latest OOS Combo And Fusion Snapshot
 
-The latest computed combo labs use chronological splits:
+The latest computed combo lab uses chronological splits:
 
 - Train: `2022-01-04` to `2023-12-29`
-- Validation: only inside the 2022-2023 training period
+- Validation: only inside the 2022-2023 in-sample block
 - Mock OOS test: `2024-01-02` to `2024-12-31`
 - No 2024 labels are used for fitting weights, model parameters, method selection, or validation.
 
-| Lab | Best model | Factor set | 2024 OOS Score | IC | IR | TVR | Long-short PnL | Long-only PnL |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Full factor combo | `CausalDecayFactorTransformerStackModel` | 96 | 9100.15 | 12.84 | 50.79 | 136.77 | 2.8479 | 0.5998 |
-| Low-correlation combo | `LightGBMMetaModel` | 8 | 4399.31 | 7.91 | 31.48 | 136.28 | 1.9457 | 0.4306 |
+Current `model_lab/latest_summary.json`:
 
-The leading model is a leakage-guarded factor Transformer stack. It trains only on the visible 2022-2023 block and uses 2024 strictly as OOS evaluation. The frontend now reports OOS PnL diagnostics instead of plotting misleading top-bottom prediction spreads:
+| Field | Value |
+| --- | ---: |
+| Selected factors | 10 |
+| Train rows | 2.15M |
+| Validation rows | 0.21M |
+| 2024 OOS rows | 1.24M |
+| Best model | `CausalDecayFactorTransformerStackModel` |
+| 2024 OOS Score | 7370.52 |
+| 2024 OOS IC | 11.2125 |
+| 2024 OOS IR | 43.7387 |
+| 2024 OOS TVR | 135.76 |
+| 2024 OOS long-short PnL | 2.4783 |
+| 2024 OOS long-only PnL | 1.3246 |
+
+Top current OOS combo models:
+
+| Model | Train Score | Val Score | 2024 OOS Score | OOS IC | OOS IR | OOS TVR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `CausalDecayFactorTransformerStackModel` | 14540.84 | 14773.80 | 7370.52 | 11.2125 | 43.7387 | 135.76 |
+| `FactorTokenTransformerRidgeStackModel` | 16698.50 | 17928.27 | 6929.42 | 10.8103 | 41.6085 | 135.52 |
+| `LightGBMMetaModel` | 20513.20 | 20480.11 | 6855.68 | 10.7312 | 41.3275 | 133.89 |
+| `MLPRegressorMetaModel` | 17194.44 | 18365.98 | 6418.81 | 10.4096 | 38.5115 | 132.56 |
+
+The leading model is a leakage-guarded factor Transformer stack. It trains only on the visible 2022-2023 block and uses 2024 strictly as OOS evaluation. The frontend reports OOS PnL diagnostics instead of plotting misleading top-bottom prediction spreads:
 
 - long-short cumulative PnL with Max DD on a secondary axis;
 - pure long-only cumulative PnL with Max DD on a secondary axis;
 - method cards with Train/Val/OOS metrics, method descriptions, TVR, and leakage notes;
-- full-factor versus low-correlation factor-basket comparison.
+- full-factor versus low-correlation factor-basket comparison where available.
 
-The Model Fusion Lab compares frozen model outputs before blending. The latest fusion panel includes a `25 x 25` output-correlation heatmap covering linear models, ML/DL models, and rank-combo methods. The heatmap uses `|corr|` coloring with blue at `0`, red at `1`, and continuous interpolation in between.
-
-| Fusion candidate | 2024 OOS Score | IC | IR | TVR |
-| --- | ---: | ---: | ---: | ---: |
-| `FusionValSoftmaxBlend` | 8261.93 | 12.36 | 45.18 | 136.42 |
-| `FusionValInverseCorrBlend` | 8078.15 | 12.20 | 44.32 | 135.91 |
-| `FusionGreedyValDiversityBlend` | 8568.76 | 12.58 | 46.91 | 136.50 |
-| `FusionTransformerAnchorValStack` | 8561.49 | 12.56 | 47.01 | 136.48 |
-
-Fusion weights are selected from Train/Val metrics and frozen output correlations before reading 2024 response labels. The current best single model remains `CausalDecayFactorTransformerStackModel`, while the best fusion diagnostic is `FusionGreedyValDiversityBlend`.
+The current correlation snapshot tracks 16 passing factors. Under an absolute
+correlation threshold of `0.70`, the low-correlation selector keeps 9 factors
+with total in-sample score `2207.23`; this subset is used for redundancy checks
+and follow-up combo experiments.
 
 ## What Is Included
 
@@ -245,17 +303,17 @@ Closed-loop mining:
 python run.py
 ```
 
-Full-factor combo lab:
+Current 10-factor combo lab:
 
 ```bash
 python rolling_model_lab.py \
-  --target-valid 96 \
+  --target-valid 10 \
   --ideas-per-round 0 \
   --max-rounds 0 \
   --allow-partial
 ```
 
-Low-correlation 8-factor lab:
+Low-correlation factor-basket lab:
 
 ```bash
 python rolling_model_lab.py \
