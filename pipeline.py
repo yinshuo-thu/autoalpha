@@ -69,6 +69,34 @@ _PV_SLICE_CACHE_ORDER: list[tuple[int, str, str]] = []
 _PV_SLICE_CACHE_MAX = 3
 
 
+def _futures_mode() -> bool:
+    return os.environ.get("AUTOALPHA_ASSET_CLASS", "futures").strip().lower() in {"future", "futures"}
+
+
+def _split_research_days(all_days: list[str], eval_days_count: int) -> tuple[list[str], list[str], list[str], list[str], str]:
+    """Return eval/requested/oos/full-export days, adapting v3 date windows to futures data."""
+    discovery_days = _filter_days(all_days, DISCOVERY_START, DISCOVERY_END)
+    if discovery_days:
+        requested = discovery_days[-eval_days_count:] if eval_days_count > 0 else discovery_days
+        oos_days = _filter_days(all_days, OOS_START, OOS_END)
+        full_export = _filter_days(all_days, DISCOVERY_START, OOS_END)
+        return discovery_days, requested, oos_days, full_export, "v3_train_2022_2023_oos_2024_report_only"
+
+    if not _futures_mode():
+        return [], [], [], [], "v3_train_2022_2023_oos_2024_report_only"
+
+    ordered = sorted(all_days)
+    split = max(1, int(len(ordered) * 0.7))
+    split = min(split, len(ordered))
+    discovery_days = ordered[:split]
+    if eval_days_count > 0:
+        requested = discovery_days[-min(eval_days_count, len(discovery_days)):]
+    else:
+        requested = discovery_days
+    oos_days = ordered[split:]
+    return discovery_days, requested, oos_days, ordered, "futures_adaptive_discovery_oos"
+
+
 def _get_data_hub(start: str | None = None, end: str | None = None) -> DataHub:
     key = (start or "__full__", end or "__full__")
     cached = _DATAHUB_CACHE.get(key)
@@ -906,14 +934,13 @@ def run(
                 suggestion="检查数据目录和 DataHub 读取配置。",
                 error_code="empty_trading_days",
             )
-        discovery_all_full = _filter_days(full_days, DISCOVERY_START, DISCOVERY_END)
+        discovery_all_full, requested_eval_days, _, _, split_mode = _split_research_days(full_days, eval_days_count)
         if eval_days_count > 0 and discovery_all_full:
-            requested_eval_days = discovery_all_full[-eval_days_count:]
             warmup_days = max(30, _cfg_int(cfg, "AUTOALPHA_DATA_WARMUP_DAYS", 45))
             eval_start_idx = full_days.index(requested_eval_days[0])
             load_start_idx = max(0, eval_start_idx - warmup_days)
             load_start = full_days[load_start_idx]
-            load_end = OOS_END
+            load_end = OOS_END if split_mode != "futures_adaptive_discovery_oos" else full_days[-1]
             if load_end not in full_days:
                 load_end = full_days[-1]
             exact_cache = Path(CACHE_ROOT) / f"pv_15m_{load_start}_{load_end}.parquet"
@@ -944,20 +971,18 @@ def run(
         _notify_pipeline_error("AutoAlpha 数据加载失败", error, stage="交易日读取")
         raise error
 
-    discovery_days_all = _filter_days(all_days, DISCOVERY_START, DISCOVERY_END)
+    discovery_days_all, requested_eval_days, oos_days, full_export_days, split_mode = _split_research_days(all_days, eval_days_count)
     if not discovery_days_all:
         error = AutoAlphaRuntimeError(
-            "2022-2023 discovery 交易日为空，当前无法执行 v3 因子发现。",
-            raw_message="No trading days in 2022-2023 discovery window.",
-            suggestion="检查数据是否覆盖 2022-01-01 到 2023-12-31。",
+            "Discovery 交易日为空，当前无法执行因子发现。",
+            raw_message="No trading days in configured discovery window.",
+            suggestion="检查数据目录、期货产品过滤和日期范围配置。",
             error_code="empty_discovery_days",
         )
         _notify_pipeline_error("AutoAlpha v3 数据切分失败", error, stage="Discovery window")
         raise error
 
     eval_days = discovery_days_all if eval_days_count <= 0 else [d for d in requested_eval_days if d in set(discovery_days_all)]
-    oos_days = _filter_days(all_days, OOS_START, OOS_END)
-    full_export_days = _filter_days(all_days, DISCOVERY_START, OOS_END)
     screen_days_count = min(
         len(eval_days),
         max(60, _cfg_int(cfg, "AUTOALPHA_SCREEN_DAYS", 160)),
@@ -974,7 +999,7 @@ def run(
         trace_path,
         "run_start",
         {
-            "mode": "v3_train_2022_2023_oos_2024_report_only",
+            "mode": split_mode,
             "eval_days": len(eval_days),
             "screen_days": len(screen_days),
             "oos_days": len(oos_days),
