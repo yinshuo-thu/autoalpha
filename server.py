@@ -569,6 +569,12 @@ def load_runtime_env_payload() -> Dict[str, Any]:
             "AUTOALPHA_DEFAULT_ROUNDS": raw.get("AUTOALPHA_DEFAULT_ROUNDS", ""),
             "AUTOALPHA_DEFAULT_IDEAS": raw.get("AUTOALPHA_DEFAULT_IDEAS", ""),
             "AUTOALPHA_DEFAULT_DAYS": raw.get("AUTOALPHA_DEFAULT_DAYS", ""),
+            "AUTOALPHA_ASSET_CLASS": raw.get("AUTOALPHA_ASSET_CLASS", ""),
+            "AUTOALPHA_FUTURE_RAW_ROOT": raw.get("AUTOALPHA_FUTURE_RAW_ROOT", ""),
+            "AUTOALPHA_OFR_ROOT": raw.get("AUTOALPHA_OFR_ROOT", ""),
+            "AUTOALPHA_FUTURE_ALPHA_ROOT": raw.get("AUTOALPHA_FUTURE_ALPHA_ROOT", ""),
+            "AUTOALPHA_FUTURE_PRODUCTS": raw.get("AUTOALPHA_FUTURE_PRODUCTS", ""),
+            "AUTOALPHA_FUTURE_DEFAULT_DAYS": raw.get("AUTOALPHA_FUTURE_DEFAULT_DAYS", ""),
             "AUTOALPHA_DEFAULT_TARGET_VALID": raw.get("AUTOALPHA_DEFAULT_TARGET_VALID", ""),
             "AUTOALPHA_PROMPT_CONTEXT_LIMIT": raw.get("AUTOALPHA_PROMPT_CONTEXT_LIMIT", ""),
             "AUTOALPHA_QUOTA_DISPLAY_FX": raw.get("AUTOALPHA_QUOTA_DISPLAY_FX", ""),
@@ -589,6 +595,9 @@ def load_runtime_env_payload() -> Dict[str, Any]:
             "outputDir": AUTOALPHA_OUTPUT_DIR,
             "researchDir": AUTOALPHA_RESEARCH_DIR,
             "modelLabDir": AUTOALPHA_MODEL_LAB_DIR,
+            "futureRawRoot": raw.get("AUTOALPHA_FUTURE_RAW_ROOT", ""),
+            "ofrRoot": raw.get("AUTOALPHA_OFR_ROOT", ""),
+            "futureAlphaRoot": raw.get("AUTOALPHA_FUTURE_ALPHA_ROOT", ""),
         },
     }
 

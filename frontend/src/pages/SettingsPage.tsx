@@ -418,6 +418,9 @@ export const SettingsPage: React.FC<{ onNavigate?: (page: PageId) => void }> = (
               ['Output Dir', paths.outputDir],
               ['Research Dir', paths.researchDir],
               ['Model Lab Dir', paths.modelLabDir],
+              ['Future Raw Root', paths.futureRawRoot],
+              ['OFR Root', paths.ofrRoot],
+              ['Future Alpha Root', paths.futureAlphaRoot],
             ].map(([label, value]) => (
               <div key={label} className="rounded-2xl border border-border/50 bg-white/80 p-4">
                 <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{label}</div>

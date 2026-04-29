@@ -9,6 +9,16 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-29T07:36:11+00:00',
+    title: 'Setting 暴露期货数据目录',
+    summary: 'server 的系统配置接口补充 futures env 和路径，Setting 的路径卡片显示 Future Raw/OFR/Future Alpha Root。',
+    tags: ['Frontend', 'Config', 'Futures'],
+    bullets: [
+      '新增 AUTOALPHA_ASSET_CLASS、AUTOALPHA_FUTURE_*、AUTOALPHA_OFR_ROOT 等配置返回。',
+      'Setting 页面路径区展示 DCE 原始数据、OFR 重建数据和既有期货 alpha 目录。',
+    ],
+  },
+  {
     timestamp: '2026-04-29T07:33:36+00:00',
     title: '前端构建验证 Setting Timeline',
     summary: '修复 Setting Timeline 使用 timestamp 的类型问题，npm install 后生产构建通过，Vite 输出 dist 可用。',
