@@ -18,7 +18,6 @@ import tempfile
 import threading
 import time
 import uuid
-import ast
 import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -87,7 +86,6 @@ AUTOALPHA_SUBMIT_DIR = os.path.join(PROJECT_ROOT, "submit")
 AUTOALPHA_MODEL_LAB_DIR = os.path.join(PROJECT_ROOT, "model_lab")
 AUTOALPHA_MODEL_LAB_EXPLORATIONS_DIR = os.path.join(AUTOALPHA_MODEL_LAB_DIR, "explorations")
 AUTOALPHA_QUOTA_DISPLAY_FX = float(os.environ.get("AUTOALPHA_QUOTA_DISPLAY_FX", "7.3"))
-AUTOALPHA_V3_QUOTA_BASELINE = float(os.environ.get("AUTOALPHA_V3_QUOTA_BASELINE", "330"))
 AUTOALPHA_BILLING_ENDPOINTS = {
     "subscription": [
         "https://vip.aipro.love/v1/dashboard/billing/subscription",
@@ -1736,20 +1734,6 @@ def _quota_status(used_pct: float, remaining: float) -> str:
     return "healthy"
 
 
-def _parse_live_result_text(text: str) -> Any:
-    raw = (text or "").strip()
-    if not raw:
-        raise ValueError("Result file 内容为空")
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-    try:
-        return ast.literal_eval(raw)
-    except Exception as exc:
-        raise ValueError(f"无法解析 Result file：{exc}") from exc
-
-
 def _write_autoalpha_kb(kb: Dict[str, Any]) -> None:
     kb["updated_at"] = now_iso()
     with open(AUTOALPHA_KB_PATH, "w", encoding="utf-8") as handle:
@@ -1926,33 +1910,6 @@ def autoalpha_generation_experience(generation: int):
         return fail(str(exc), 500)
 
 
-@app.route("/api/autoalpha/factors/<run_id>/live-result", methods=["POST"])
-def autoalpha_factor_live_result(run_id: str):
-    data = request.get_json(silent=True) or {}
-    raw_text = data.get("result_text") or data.get("result") or data.get("raw") or ""
-    try:
-        parsed = _parse_live_result_text(str(raw_text))
-    except ValueError as exc:
-        return fail(str(exc), 400)
-
-    kb = _load_autoalpha_kb()
-    factors = kb.setdefault("factors", {})
-    if run_id not in factors:
-        return fail("Factor not found", 404)
-
-    record = {
-        "raw": str(raw_text).strip(),
-        "data": parsed,
-        "submitted_at": now_iso(),
-    }
-    factors[run_id]["live_test_result"] = record
-    factors[run_id]["live_submitted"] = True
-    factors[run_id]["live_result_updated_at"] = record["submitted_at"]
-    _write_autoalpha_kb(kb)
-
-    return ok({"run_id": run_id, "live_test_result": record, "live_submitted": True})
-
-
 def _safe_autoalpha_artifact(path: str) -> Optional[str]:
     if not path:
         return None
@@ -2089,15 +2046,12 @@ def autoalpha_balance():
     source_used = _safe_float(usage_data.get("total_usage", 0)) / 100.0
     source_remaining = max(0.0, source_total_quota - source_used)
 
-    # Convert provider units to the quota-pack display unit used by the frontend
-    # (e.g. 438 -> 60.00, 94.53 -> 12.95).
-    runtime_cfg = load_runtime_config()
-    fx_rate = _safe_float(runtime_cfg.get("AUTOALPHA_QUOTA_DISPLAY_FX", AUTOALPHA_QUOTA_DISPLAY_FX), AUTOALPHA_QUOTA_DISPLAY_FX)
-    fx_rate = fx_rate if fx_rate > 0 else 1.0
-    source_total_display = source_total_quota / fx_rate
-    source_used_display = source_used / fx_rate
-    total_quota = max(0.0, source_total_display - AUTOALPHA_V3_QUOTA_BASELINE)
-    used = max(0.0, source_used_display - AUTOALPHA_V3_QUOTA_BASELINE)
+    # New API keys should show provider-returned quota units directly.
+    # Do not subtract historical v2/v3 baselines and do not apply display FX.
+    source_total_display = source_total_quota
+    source_used_display = source_used
+    total_quota = max(0.0, source_total_display)
+    used = max(0.0, source_used_display)
     remaining = max(0.0, total_quota - used)
 
     # Per-factor cost from knowledge base
@@ -2109,7 +2063,6 @@ def autoalpha_balance():
     total_factors = len(all_factors)
     passing_factors = sum(1 for f in all_factors if f.get("PassGates"))
 
-    historical_exploration_credit = AUTOALPHA_V3_QUOTA_BASELINE
     factor_cost_basis = used
     avg_cost_per_factor = factor_cost_basis / total_factors if total_factors > 0 else 0.0
     avg_cost_per_valid = factor_cost_basis / passing_factors if passing_factors > 0 else 0.0
@@ -2134,8 +2087,9 @@ def autoalpha_balance():
         "avg_cost_per_factor": round(avg_cost_per_factor, 4),
         "avg_cost_per_valid_factor": round(avg_cost_per_valid, 4),
         "factor_cost_basis": round(factor_cost_basis, 2),
-        "historical_exploration_credit": round(historical_exploration_credit, 2),
-        "quota_baseline_subtracted": round(AUTOALPHA_V3_QUOTA_BASELINE, 2),
+        "historical_exploration_credit": 0.0,
+        "quota_baseline_subtracted": 0.0,
+        "quota_display_mode": "provider_raw",
         "source_total_quota": round(source_total_display, 2),
         "source_used": round(source_used_display, 2),
         "est_total_tokens": est_total_tokens,

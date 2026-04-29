@@ -51,12 +51,6 @@ interface KbFactor {
       tvr?: number;
     };
   };
-  live_submitted?: boolean;
-  live_test_result?: {
-    raw?: string;
-    data?: any;
-    submitted_at?: string;
-  };
 }
 
 interface LoopStatus {
@@ -1987,7 +1981,7 @@ export const AutoAlphaPage: React.FC = () => {
       <div className="min-w-0 max-w-full space-y-6 overflow-x-hidden pb-10">
       <Panel
         title="AutoAlpha Research Cockpit"
-        subtitle="主控制台与独立回测已收口到这里。现在统一在 AutoAlpha 页里完成灵感输入、全量挖掘、云端一致口径评估、rolling 模型实验与产出查看。"
+        subtitle="主控制台与独立回测已收口到这里。现在统一在 AutoAlpha 页里完成灵感输入、全量挖掘、tick h60 评估、rolling 模型实验与产出查看。"
         right={(
           <div className="rounded-full border border-border/60 bg-white/80 px-4 py-2 text-sm">
             <span className="text-muted-foreground">状态:</span>{' '}
@@ -2002,7 +1996,7 @@ export const AutoAlphaPage: React.FC = () => {
           <StatCard label="已测试因子" value={String(status?.total_tested ?? 0)} helper="累计知识库记录" />
           <StatCard label="通过 Gate" value={String(status?.total_passing ?? 0)} helper={`通过率 ${formatPercent(knowledge?.pass_rate ?? 0)}`} accent="bg-emerald-50" />
           <StatCard label="通过 OOS Gate" value={String(oosGateStats.passing)} helper={`${oosGateStats.total} 个有 2024 OOS / ${formatPercent(oosGateStats.passRate)}`} accent="bg-teal-50" />
-          <StatCard label="最佳 Score" value={formatNumber(status?.best_score ?? 0, 2)} helper="按云端一致口径显示" accent="bg-sky-50" />
+          <StatCard label="最佳 Score" value={formatNumber(status?.best_score ?? 0, 2)} helper="按期货 tick h60 口径显示" accent="bg-sky-50" />
           <StatCard label="Ideas" value={String(inspirations?.count ?? 0)} helper="Manual / Paper / LLM" accent="bg-violet-50" />
         </div>
       </Panel>
@@ -2026,7 +2020,7 @@ export const AutoAlphaPage: React.FC = () => {
 	        <div className="flex min-w-0 flex-col gap-6">
 	        <Panel
 	          title="额度包与成本"
-	          subtitle="v3 按第三方订阅接口额度自动扣除 v2 已消耗的 330 基线后展示，从 0 重新累计。"
+	          subtitle="直接展示当前 API key 对应额度接口返回的原始额度、用量和剩余量。"
 	          right={<div className={`rounded-full bg-emerald-500/10 px-4 py-2 text-sm font-medium ${quotaTone(balance?.quota_status ?? 'healthy')}`}>{balance?.quota_status ?? 'healthy'}</div>}
 	        >
           {(() => {
@@ -2051,7 +2045,7 @@ export const AutoAlphaPage: React.FC = () => {
             );
           })()}
           <div className="grid min-w-0 gap-4 md:grid-cols-3">
-            <StatCard label="总额度" value={formatMoney(balance?.total_quota ?? 0)} helper="已扣除 v2 基线 330" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
+            <StatCard label="总额度" value={formatMoney(balance?.total_quota ?? 0)} helper="接口原始额度" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
             <StatCard label="已用额度" value={formatMoney(balance?.used ?? 0)} helper={`${formatPercent(balance?.used_pct ?? 0)} 已使用`} accent="bg-orange-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
             <StatCard label="剩余额度" value={formatMoney(balance?.remaining ?? 0)} helper={`${formatPercent(balance?.remaining_pct ?? 0)} 剩余`} accent="bg-emerald-50" valueClassName="whitespace-nowrap text-[clamp(1.35rem,1.9vw,2.1rem)] tabular-nums" />
             <StatCard label="因子成本" value={formatMoney(balance?.avg_cost_per_factor ?? 0)} helper={`${formatInteger(balance?.avg_tokens_per_factor ?? 0)} tokens / 因子`} accent="bg-sky-50" valueClassName="whitespace-nowrap text-[clamp(1.25rem,1.7vw,1.9rem)] tabular-nums" />
@@ -2355,7 +2349,7 @@ export const AutoAlphaPage: React.FC = () => {
                   单因子即时验证
                 </div>
                 {!manualFactor ? (
-                  <div className="text-sm text-muted-foreground">输入 Prompt 或 DSL 后，可以在这里直接看到单因子的云端一致口径结果。</div>
+                  <div className="text-sm text-muted-foreground">输入 Prompt 或 DSL 后，可以在这里直接看到单因子的期货 tick h60 评估结果。</div>
                 ) : (
                   <div className="space-y-3">
                     <div className="grid grid-cols-2 gap-3">
@@ -2440,7 +2434,7 @@ export const AutoAlphaPage: React.FC = () => {
 
           <div className="mt-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
             <StatCard label="最近更新" value={formatDateTime(status?.updated_at)} helper={status?.pid ? `PID ${status.pid}` : '轻量状态轮询间隔 6 秒'} valueClassName="text-xl" />
-            <StatCard label="云端一致说明" value="IC×100 / TVR / Score 已对齐" helper="项目内所有 IC 展示值均为实际 IC × 100" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
+            <StatCard label="期货评价说明" value="tick h60 / raw IC / ICIR" helper="使用 OFR tick 网格的 15s forward return" accent="bg-emerald-50" valueClassName="text-[clamp(1.2rem,2vw,1.75rem)] leading-tight" />
           </div>
 
           <LiveMiningPanel status={status} />

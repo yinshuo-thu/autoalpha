@@ -109,11 +109,8 @@ def _quota_snapshot() -> dict[str, float | str]:
         return {"total": 0.0, "used": 0.0, "remaining": 0.0, "known": 0.0}
     total_source = float(subscription.get("hard_limit_usd", 0) or 0)
     used_source = float(usage.get("total_usage", 0) or 0) / 100.0
-    cfg = load_runtime_config()
-    fx_rate = float(cfg.get("AUTOALPHA_QUOTA_DISPLAY_FX", "7.3") or 7.3)
-    fx_rate = fx_rate if fx_rate > 0 else 1.0
-    total = total_source / fx_rate
-    used = used_source / fx_rate
+    total = total_source
+    used = used_source
     remaining = max(0.0, total - used)
     return {"total": total, "used": used, "remaining": remaining, "known": 1.0 if total > 0 else 0.0}
 

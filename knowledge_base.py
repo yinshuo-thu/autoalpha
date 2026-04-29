@@ -880,10 +880,6 @@ def add_factor(
         "fingerprint": formula_structural_fingerprint(result.get("formula", "")),
     }
 
-    for key in ("live_test_result", "live_submitted", "live_result_updated_at"):
-        if key in existing:
-            entry[key] = existing[key]
-
     entry.update(_copy_submit_artifact(run_id, entry))
 
     factors[run_id] = entry

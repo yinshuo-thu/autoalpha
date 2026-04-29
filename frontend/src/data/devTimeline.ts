@@ -9,6 +9,28 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-29T09:56:59+00:00',
+    title: '移除 Lab Test 手工对账功能',
+    summary: '实盘流程不需要提交后手工填入 Lab Test 结果，删除相关前端入口、对账图、表格列、弹窗和后端 live-result API。',
+    tags: ['Frontend', 'Backend', 'Runtime'],
+    bullets: [
+      'AutoAlphaRecordsPage 移除 Lab Test 对账区、Real Test 行、填写按钮和保存弹窗。',
+      'server.py 删除 /api/autoalpha/factors/<run_id>/live-result 接口与解析逻辑。',
+      'knowledge_base 不再保留 live_test_result/live_submitted 字段，AutoAlpha 首页改为 tick h60 评价文案。',
+    ],
+  },
+  {
+    timestamp: '2026-04-29T09:52:09+00:00',
+    title: '额度展示改为 API 原始数',
+    summary: '新 API key 不再沿用旧 v2/v3 成本基线，额度包页面和 loop 额度检查均直接使用 billing 接口返回的原始 hard_limit/usage 口径。',
+    tags: ['API', 'Frontend', 'Runtime'],
+    bullets: [
+      'server /api/autoalpha/balance 移除 /7.3 展示换算和 -330 baseline，quota_baseline_subtracted 固定为 0。',
+      'loop.py 的额度耗尽检查改为原始 provider quota 口径。',
+      '前端额度卡片文案改为接口原始额度。',
+    ],
+  },
+  {
     timestamp: '2026-04-29T09:39:05+00:00',
     title: '清理 tick h60 迁移后的旧 TVR 反馈',
     summary: '系统性检查运行日志和源码后，移除知识库/RAG 与前端记录页里残留的旧 TVR gate 和旧 IC/IR 阈值提示，避免挖掘 prompt 被历史股票/15m 标准带偏。',

@@ -1,5 +1,5 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart2, ChevronLeft, ChevronRight, Download, FileStack, FileText, GitBranch } from 'lucide-react';
+import { BarChart2, Download, FileStack, FileText, GitBranch } from 'lucide-react';
 import {
   Bar,
   BarChart,
@@ -41,8 +41,6 @@ interface KbFactor {
   factor_card_path?: string;
   download_available?: boolean;
   parent_run_ids?: string[];
-  live_submitted?: boolean;
-  live_test_result?: LiveTestResult;
   oss_2024?: {
     start?: string;
     end?: string;
@@ -74,7 +72,6 @@ interface PeriodMetric {
   Score?: number;
   PassGates?: boolean;
   used_for_discovery?: boolean;
-  is_live_test?: boolean;
 }
 
 interface OosComparison {
@@ -94,30 +91,6 @@ interface ScreenFailDetail {
   threshold?: number | string;
   direction?: string;
   message?: string;
-}
-
-interface LiveTestResult {
-  raw: string;
-  data: any;
-  submitted_at: string;
-}
-
-interface LiveComparisonRow {
-  run_id: string;
-  label: string;
-  submitted_at: string;
-  localScore: number;
-  cloudScore: number;
-  scoreDelta: number;
-  localIC: number;
-  cloudIC: number;
-  icDelta: number;
-  localIR: number;
-  cloudIR: number;
-  irDelta: number;
-  localTVR: number;
-  cloudTVR: number;
-  tvrDelta: number;
 }
 
 interface AutoAlphaFile {
@@ -383,80 +356,6 @@ function isSubmitReady(factor: KbFactor) {
   return Boolean(factor.factor_card_path || factor.research_path);
 }
 
-function liveResultMetrics(result?: LiveTestResult) {
-  const data = result?.data;
-  if (Array.isArray(data)) return data[0] || {};
-  if (data && typeof data === 'object') return data;
-  return {};
-}
-
-function metricValue(row: Record<string, unknown>, keys: string[], fallback = 0) {
-  for (const key of keys) {
-    if (row[key] === undefined || row[key] === null || row[key] === '') continue;
-    const numeric = Number(row[key]);
-    if (Number.isFinite(numeric)) return numeric;
-  }
-  return fallback;
-}
-
-function parseLiveMetricRecord(factor: KbFactor) {
-  const row = liveResultMetrics(factor.live_test_result);
-  if (!row || typeof row !== 'object') return null;
-  const record = row as Record<string, unknown>;
-  return {
-    score: metricValue(record, ['score', 'Score']),
-    ic: metricValue(record, ['IC', 'ic']),
-    ir: metricValue(record, ['IR', 'ir']),
-    tvr: metricValue(record, ['tvr', 'TVR', 'Turnover', 'turnover']),
-    days: metricValue(record, ['nd', 'days', 'Days'], 0),
-  };
-}
-
-function buildLiveComparisonData(factors: KbFactor[]): LiveComparisonRow[] {
-  return [...factors]
-    .filter((factor) => factor.live_test_result && parseLiveMetricRecord(factor))
-    .sort((a, b) => {
-      const aTs = new Date(a.live_test_result?.submitted_at || '').getTime();
-      const bTs = new Date(b.live_test_result?.submitted_at || '').getTime();
-      return bTs - aTs;
-    })
-    .slice(0, 6)
-    .reverse()
-    .map((factor) => {
-      const live = parseLiveMetricRecord(factor)!;
-      return {
-        run_id: factor.run_id,
-        label: factor.run_id.slice(-8),
-        submitted_at: factor.live_test_result?.submitted_at || '',
-        localScore: Number(factor.Score || 0),
-        cloudScore: live.score,
-        scoreDelta: live.score - Number(factor.Score || 0),
-        localIC: Number(factor.IC || 0),
-        cloudIC: live.ic,
-        icDelta: live.ic - Number(factor.IC || 0),
-        localIR: Number(factor.IR || 0),
-        cloudIR: live.ir,
-        irDelta: live.ir - Number(factor.IR || 0),
-        localTVR: Number(factor.tvr || 0),
-        cloudTVR: live.tvr,
-        tvrDelta: live.tvr - Number(factor.tvr || 0),
-      };
-    });
-}
-
-const LIVE_COMPARISON_METRICS: Array<{
-  title: 'Score' | 'IC' | 'IR' | 'TVR';
-  localKey: keyof LiveComparisonRow;
-  cloudKey: keyof LiveComparisonRow;
-  deltaKey: keyof LiveComparisonRow;
-  digits: number;
-}> = [
-  { title: 'Score', localKey: 'localScore', cloudKey: 'cloudScore', deltaKey: 'scoreDelta', digits: 2 },
-  { title: 'IC', localKey: 'localIC', cloudKey: 'cloudIC', deltaKey: 'icDelta', digits: 3 },
-  { title: 'IR', localKey: 'localIR', cloudKey: 'cloudIR', deltaKey: 'irDelta', digits: 3 },
-  { title: 'TVR', localKey: 'localTVR', cloudKey: 'cloudTVR', deltaKey: 'tvrDelta', digits: 1 },
-];
-
 function formatSignedNumber(value: number, digits = 2) {
   if (!Number.isFinite(value)) return '--';
   if (value > 0) return `+${value.toFixed(digits)}`;
@@ -477,30 +376,11 @@ function periodMetricNumber(row: PeriodMetric | undefined, key: 'Score' | 'IC' |
   return Number.isFinite(value) ? value : fallback;
 }
 
-function livePeriodRow(factor: KbFactor): PeriodMetric | null {
-  if (!factor.live_submitted || !factor.live_test_result) return null;
-  const live = parseLiveMetricRecord(factor);
-  if (!live) return null;
-  return {
-    period: 'live_test',
-    label: 'Real Test',
-    days: live.days || undefined,
-    IC: live.ic,
-    IR: live.ir,
-    tvr: live.tvr,
-    Score: live.score,
-    PassGates: true,
-    used_for_discovery: false,
-    is_live_test: true,
-  };
-}
-
 function factorPeriodRows(factor: KbFactor): PeriodMetric[] {
-  const live = livePeriodRow(factor);
   if (Array.isArray(factor.period_metrics) && factor.period_metrics.length) {
     const order = ['discovery', 'oos_2024', 'full_2022_2024'];
     const baseRows = [...factor.period_metrics].sort((a, b) => order.indexOf(a.period) - order.indexOf(b.period));
-    return live ? [...baseRows, live] : baseRows;
+    return baseRows;
   }
   const oosMetrics = factor.oss_2024?.metrics || {};
   const fullMetrics = factor.full_2022_2024?.metrics || {};
@@ -539,14 +419,13 @@ function factorPeriodRows(factor: KbFactor): PeriodMetric[] {
       used_for_discovery: false,
     },
   ];
-  return live ? [...baseRows, live] : baseRows;
+  return baseRows;
 }
 
 function periodLabel(row: PeriodMetric) {
   if (row.period === 'discovery') return '22-23';
   if (row.period === 'oos_2024') return 'OOS 2024';
   if (row.period === 'full_2022_2024') return 'Overall';
-  if (row.period === 'live_test') return 'Real Test';
   return row.label || row.period;
 }
 
@@ -656,7 +535,6 @@ function factorRowBackground(factor: KbFactor, maxScore: number) {
   if (!factor.PassGates && reason.includes('IR')) return 'rgba(124, 58, 237, 0.08)';
   if (!factor.PassGates && (reason.includes('TVR') || reason.includes('Turnover'))) return 'rgba(249, 115, 22, 0.08)';
   if (!factor.PassGates && reason.includes('Score')) return 'rgba(148, 163, 184, 0.08)';
-  if (factor.live_submitted && factor.live_test_result) return 'rgba(20, 184, 166, 0.18)';
   if (factor.Score <= 0 || maxScore <= 0) return 'rgba(148, 163, 184, 0.04)';
   const alpha = Math.min(0.08 + (factor.Score / maxScore) * 0.2, 0.28);
   return `rgba(16, 185, 129, ${alpha})`;
@@ -664,7 +542,6 @@ function factorRowBackground(factor: KbFactor, maxScore: number) {
 
 const pillButtonClass = "inline-flex h-8 min-w-[4.75rem] items-center justify-center rounded-full px-3 text-xs font-medium";
 const actionButtonClass = `${pillButtonClass} border border-border/60 text-foreground transition-colors hover:bg-white`;
-const submittedButtonClass = `${pillButtonClass} bg-emerald-100 text-emerald-700 transition-colors hover:bg-emerald-200`;
 const RECORDS_POLL_INTERVAL_MS = 15000;
 const FACTOR_TABLE_BATCH_SIZE = 200;
 const SUMMARY_QUERY = '/api/autoalpha/knowledge?compact_factors=1&include_factor_correlations=0&include_artifacts=0&include_generation_experiences=0';
@@ -688,90 +565,6 @@ const Panel = ({
     {children}
   </section>
 );
-
-const LiveComparisonSlider = ({
-  data,
-  onSelectRunId,
-}: {
-  data: LiveComparisonRow[];
-  onSelectRunId: (runId: string) => void;
-}) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const scrollCards = (direction: -1 | 1) => {
-    const node = containerRef.current;
-    if (!node) return;
-    const offset = Math.max(node.clientWidth * 0.82, 280) * direction;
-    node.scrollBy({ left: offset, behavior: 'smooth' });
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">变化速览</div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => scrollCards(-1)}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border/60 bg-white text-slate-600 transition-colors hover:bg-slate-50"
-            aria-label="查看上一组对账卡片"
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => scrollCards(1)}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border/60 bg-white text-slate-600 transition-colors hover:bg-slate-50"
-            aria-label="查看下一组对账卡片"
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-
-      <div
-        ref={containerRef}
-        className="flex snap-x snap-mandatory gap-3 overflow-x-auto pb-2 pr-1 scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {data.map((row) => (
-          <div
-            key={row.run_id}
-            className="min-w-[260px] max-w-[300px] shrink-0 snap-start rounded-2xl border border-border/40 bg-slate-50 p-3"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <button
-                onClick={() => onSelectRunId(row.run_id)}
-                className="min-w-0 truncate text-left font-mono text-xs font-medium text-sky-700 underline decoration-sky-400 underline-offset-4 hover:text-sky-900"
-              >
-                {row.run_id}
-              </button>
-              <div className="shrink-0 text-[11px] text-muted-foreground">{formatDateTime(row.submitted_at)}</div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              {LIVE_COMPARISON_METRICS.map((metric) => {
-                const localValue = Number(row[metric.localKey]);
-                const cloudValue = Number(row[metric.cloudKey]);
-                const deltaValue = Number(row[metric.deltaKey]);
-                return (
-                  <div key={`${row.run_id}-${metric.title}`} className="rounded-xl bg-white/90 p-2.5">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{metric.title}</div>
-                    <div className="mt-1 font-mono text-[11px] text-slate-700">
-                      {formatNumber(localValue, metric.digits)} {'->'} {formatNumber(cloudValue, metric.digits)}
-                    </div>
-                    <div className={`mt-1 font-mono text-xs font-semibold ${deltaTone(deltaValue)}`}>
-                      {formatSignedNumber(deltaValue, metric.digits)}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-};
 
 const SmallChart = ({
   data,
@@ -1597,53 +1390,6 @@ const ResearchModal = ({ runId, onClose }: { runId: string; onClose: () => void 
   );
 };
 
-const LiveResultModal = ({
-  factor,
-  value,
-  error,
-  saving,
-  onChange,
-  onSave,
-  onClose,
-}: {
-  factor: KbFactor;
-  value: string;
-  error: string;
-  saving: boolean;
-  onChange: (value: string) => void;
-  onSave: () => void;
-  onClose: () => void;
-}) => (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" onClick={onClose}>
-    <div className="w-full max-w-3xl rounded-[28px] border border-border/50 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-      <div className="mb-5 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Lab Test 结果</div>
-          <div className="mt-2 break-all text-lg font-semibold text-foreground">{factor.run_id}</div>
-        </div>
-        <button onClick={onClose} className="rounded-full border border-border/60 px-3 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground">
-          关闭
-        </button>
-      </div>
-      <textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder="[{'IC': 0.8086, 'IR': 4.2816, 'tvr': 499.092, ...}]"
-        className="h-64 w-full rounded-2xl border border-border/60 bg-slate-50 px-4 py-3 font-mono text-xs leading-6 outline-none focus:border-slate-400"
-      />
-      {error ? <div className="mt-3 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div> : null}
-      <div className="mt-4 flex justify-end gap-3">
-        <button onClick={onClose} className="rounded-2xl border border-border/60 px-4 py-2 text-sm text-foreground transition-colors hover:bg-slate-50">
-          取消
-        </button>
-        <button onClick={onSave} disabled={saving || !value.trim()} className="rounded-2xl bg-slate-950 px-4 py-2 text-sm text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">
-          {saving ? '保存中...' : '保存 Lab Test'}
-        </button>
-      </div>
-    </div>
-  </div>
-);
-
 export const AutoAlphaRecordsPage: React.FC = () => {
   const [summaryKnowledge, setSummaryKnowledge] = useState<KnowledgePayload | null>(null);
   const [tableKnowledge, setTableKnowledge] = useState<KnowledgePayload | null>(null);
@@ -1655,10 +1401,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
   const [tableError, setTableError] = useState('');
   const [correlationError, setCorrelationError] = useState('');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [liveResultFactor, setLiveResultFactor] = useState<KbFactor | null>(null);
-  const [liveResultText, setLiveResultText] = useState('');
-  const [liveResultError, setLiveResultError] = useState('');
-  const [liveResultSaving, setLiveResultSaving] = useState(false);
   const [generationNote, setGenerationNote] = useState<GenerationExperience | null>(null);
   const [generationNoteLoading, setGenerationNoteLoading] = useState<number | null>(null);
   const [generationNoteRegenerating, setGenerationNoteRegenerating] = useState(false);
@@ -1813,7 +1555,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
   );
   const outputFiles = tableKnowledge?.artifacts.output_files ?? [];
   const researchReports = tableKnowledge?.artifacts.research_reports ?? [];
-  const liveComparisonData = useMemo(() => buildLiveComparisonData(factors), [factors]);
   const visibleFactors = useMemo(
     () => deferredFactors.slice(0, visibleFactorCount),
     [deferredFactors, visibleFactorCount]
@@ -1881,43 +1622,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
     }
   };
 
-  const openLiveResultModal = (factor: KbFactor) => {
-    setLiveResultFactor(factor);
-    setLiveResultText(factor.live_test_result?.raw || '');
-    setLiveResultError('');
-  };
-
-  const saveLiveResult = async () => {
-    if (!liveResultFactor) return;
-    setLiveResultSaving(true);
-    setLiveResultError('');
-    try {
-      const data = await fetchJson<{ run_id: string; live_test_result: LiveTestResult; live_submitted: boolean }>(
-        `/api/autoalpha/factors/${liveResultFactor.run_id}/live-result`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ result_text: liveResultText }),
-        }
-      );
-      setTableKnowledge((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          factors: prev.factors.map((factor) =>
-            factor.run_id === data.run_id
-              ? { ...factor, live_test_result: data.live_test_result, live_submitted: data.live_submitted }
-              : factor
-          ),
-        };
-      });
-      setLiveResultFactor(null);
-      setLiveResultText('');
-    } catch (error: any) {
-      setLiveResultError(error.message || '保存失败');
-    } finally {
-      setLiveResultSaving(false);
-    }
-  };
 
   return (
     <div className="space-y-6 pb-10">
@@ -2056,42 +1760,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
           </div>
 
           <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
-            <div className="mb-1 text-sm font-medium text-foreground">Lab Test 提交结果对账</div>
-            <div className="mb-4 text-xs leading-5 text-muted-foreground">
-              对比本地评估与提交后返回的云端结果，帮助快速看清 Score、IC、IR、TVR 的偏差方向和量级。
-            </div>
-            {liveComparisonData.length ? (
-              <div className="space-y-4">
-                <div className="grid gap-3 2xl:grid-cols-2">
-                  {LIVE_COMPARISON_METRICS.map((metric) => (
-                    <div key={metric.title} className="rounded-2xl border border-border/40 bg-slate-50 p-3">
-                      <div className="mb-2 text-xs font-medium text-foreground">{metric.title}</div>
-                      <div className="h-36">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={liveComparisonData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                            <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 10 }} />
-                            <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
-                            <Tooltip formatter={(value: any) => formatMetric(value, metric.digits)} />
-                            <Legend />
-                            <Bar dataKey={metric.localKey} name="本地" fill="#94a3b8" radius={[5, 5, 0, 0]} />
-                            <Bar dataKey={metric.cloudKey} name="提交后" fill="#2563eb" radius={[5, 5, 0, 0]} />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <LiveComparisonSlider data={liveComparisonData} onSelectRunId={setSelectedRunId} />
-              </div>
-            ) : (
-              <div className="rounded-2xl bg-slate-50 p-4 text-sm text-muted-foreground">
-                还没有已提交的 Lab Test 结果。先在知识库因子表里填写或保存提交结果，这里会自动生成对账视图。
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-3xl border border-border/50 bg-white/90 p-4">
             <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
               <FileStack className="h-4 w-4 text-sky-500" />
               最近输出文件
@@ -2204,7 +1872,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
         )}
       </Panel>
 
-      <Panel title="知识库因子表" subtitle="每个因子共享一个名称列，并按三行展示挖掘区间、2024 OOS、三年整体指标；填写 Lab Test 后会追加 Real Test 行展示真实 IC、IR、Score 等指标。">
+      <Panel title="知识库因子表" subtitle="每个因子共享一个名称列，并按三行展示挖掘区间、2024 OOS、三年整体指标。">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-muted-foreground">
             当前渲染 {visibleFactors.length} / {factors.length} 条记录，避免一次性挂载整张大表拖慢页面。
@@ -2234,7 +1902,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
           </div>
         </div>
         <div className="max-h-[720px] overflow-auto rounded-3xl border border-border/40 bg-white/70">
-          <table className="min-w-[1600px] table-fixed text-sm">
+          <table className="min-w-[1500px] table-fixed text-sm">
             <thead className="sticky top-0 z-10 bg-white">
               <tr className="border-b border-border/50 text-left text-xs uppercase tracking-[0.18em] text-muted-foreground">
                 <th className="w-16 px-3 py-3">Rank</th>
@@ -2249,19 +1917,18 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                 <th className="w-[30rem] px-3 py-3">Formula</th>
                 <th className="w-[22rem] px-3 py-3">Thought</th>
                 <th className="w-64 px-3 py-3">Status/Gate</th>
-                <th className="w-24 px-3 py-3 text-center">Lab Test</th>
               </tr>
             </thead>
             <tbody>
               {tableLoading && !tableKnowledge ? (
                 <tr>
-                  <td colSpan={13} className="px-3 py-12 text-center text-sm text-muted-foreground">
+                  <td colSpan={12} className="px-3 py-12 text-center text-sm text-muted-foreground">
                     因子表加载中…
                   </td>
                 </tr>
               ) : visibleFactors.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="px-3 py-12 text-center text-sm text-muted-foreground">
+                  <td colSpan={12} className="px-3 py-12 text-center text-sm text-muted-foreground">
                     {factors.length === 0 ? '还没有因子记录。启动循环后，这里会持续刷新。' : '当前没有可显示的因子记录。'}
                   </td>
                 </tr>
@@ -2293,7 +1960,7 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                           <td className="px-3 py-3 align-top">
                             <div className="font-medium text-foreground">{periodLabel(period)}</div>
                             <div className="mt-1 text-[11px] text-muted-foreground">
-                              {period.is_live_test ? '真实测试' : period.used_for_discovery ? '用于发现' : '只展示'}
+                              {period.used_for_discovery ? '用于发现' : '只展示'}
                             </div>
                           </td>
                           <td className="px-3 py-3 text-right font-semibold text-foreground">{formatNumber(Number(period.Score || 0), 2)}</td>
@@ -2361,51 +2028,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
                                     ))}
                                   </div>
                                 ) : null}
-                              </td>
-                              <td rowSpan={rowSpan} className="px-3 py-3 align-top">
-                                {factor.live_submitted && factor.live_test_result ? (
-                                  <HoverCard>
-                                    <HoverCardTrigger asChild>
-                                      <button onClick={() => openLiveResultModal(factor)} className={submittedButtonClass}>
-                                        已提交
-                                      </button>
-                                    </HoverCardTrigger>
-                                    <HoverCardContent align="end" className="w-[520px] border border-slate-200 bg-white shadow-2xl backdrop-blur-none">
-                                      <div className="space-y-3 text-xs">
-                                        <div className="flex items-center justify-between gap-3">
-                                          <div className="uppercase tracking-[0.18em] text-muted-foreground">Lab Test</div>
-                                          <div className="text-muted-foreground">{formatDateTime(factor.live_test_result.submitted_at)}</div>
-                                        </div>
-                                        <div className="grid grid-cols-4 gap-2">
-                                          {['IC', 'IR', 'tvr', 'score', 'cover_all', 'nd', 'max', 'min'].map((key) => {
-                                            const metrics = liveResultMetrics(factor.live_test_result);
-                                            const value =
-                                              key === 'score'
-                                                ? metricValue(metrics, ['score', 'Score'])
-                                                : key === 'tvr'
-                                                  ? metricValue(metrics, ['tvr', 'TVR', 'Turnover', 'turnover'])
-                                                  : key === 'IC'
-                                                    ? metricValue(metrics, ['IC', 'ic'])
-                                                    : key === 'IR'
-                                                      ? metricValue(metrics, ['IR', 'ir'])
-                                                      : metrics[key];
-                                            return (
-                                              <div key={key} className="rounded-xl bg-slate-50 p-2">
-                                                <div className="text-[10px] text-muted-foreground">{key}</div>
-                                                <div className="mt-1 break-words font-mono text-foreground">{formatMetric(value)}</div>
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                        <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-slate-50 p-3 font-mono text-[11px] leading-5 text-slate-700">{factor.live_test_result.raw}</pre>
-                                      </div>
-                                    </HoverCardContent>
-                                  </HoverCard>
-                                ) : (
-                                  <button onClick={() => openLiveResultModal(factor)} className={actionButtonClass}>
-                                    填入
-                                  </button>
-                                )}
                               </td>
                             </>
                           ) : null}
@@ -2480,17 +2102,6 @@ export const AutoAlphaRecordsPage: React.FC = () => {
             </div>
           </div>
         </div>
-      ) : null}
-      {liveResultFactor ? (
-        <LiveResultModal
-          factor={liveResultFactor}
-          value={liveResultText}
-          error={liveResultError}
-          saving={liveResultSaving}
-          onChange={setLiveResultText}
-          onSave={saveLiveResult}
-          onClose={() => setLiveResultFactor(null)}
-        />
       ) : null}
     </div>
   );
