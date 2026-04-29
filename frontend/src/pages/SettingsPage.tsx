@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Loader2, Save, RefreshCcw, Cpu, Database, SlidersHorizontal, CheckCircle2, AlertCircle, History } from 'lucide-react';
 import { getSystemConfig, testLlmConnection, updateSystemConfig } from '@/services/api';
 import type { PageId } from '@/components/layout/Layout';
+import { devTimeline } from '@/data/devTimeline';
 
 interface SettingsState {
   apiKey: string;
@@ -147,6 +148,10 @@ export const SettingsPage: React.FC<{ onNavigate?: (page: PageId) => void }> = (
   const [error, setError] = useState('');
   const [testResult, setTestResult] = useState('');
   const [secretState, setSecretState] = useState<Record<string, boolean>>({});
+  const recentTimeline = useMemo(
+    () => [...devTimeline].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 6),
+    []
+  );
 
   const loadConfig = async () => {
     setLoading(true);
@@ -331,6 +336,18 @@ export const SettingsPage: React.FC<{ onNavigate?: (page: PageId) => void }> = (
       ) : null}
 
       <div className="grid auto-rows-fr gap-6 xl:grid-cols-2">
+        <Section title="Timeline" subtitle="每次更新、修改和测试都必须记录到这里，便于追踪期货适配过程。" icon={History} className="xl:col-span-2">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {recentTimeline.map((item) => (
+              <article key={`${item.timestamp}-${item.title}`} className="rounded-2xl border border-border/50 bg-white/80 p-4">
+                <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">{item.timestamp}</div>
+                <h3 className="mt-2 text-sm font-semibold text-foreground">{item.title}</h3>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">{item.summary}</p>
+              </article>
+            ))}
+          </div>
+        </Section>
+
         <Section
           title="模型路由"
           subtitle="主模型负责因子生成，便宜模型负责灵感摘要等机械工作。保存后会立刻用于新的测试和新启动的 loop。"

@@ -25,6 +25,11 @@ from prepare_data import DataHub
 from core.submission import SubmissionBuilder
 
 
+def _contract_product(contract):
+    from core.futures_alpha import product_from_contract
+    return product_from_contract(contract)
+
+
 def compute_formula(formula_text, data_hub):
     """
     Compute a factor from a DSL formula on real 15m data.
@@ -32,7 +37,12 @@ def compute_formula(formula_text, data_hub):
     """
     from factors.operators import (
         lag, delta, ts_mean, ts_std, ts_sum, ts_max, ts_min, ts_zscore,
-        ts_rank, ts_decay_linear, ts_cov, ts_corr, cs_rank, cs_demean, cs_zscore, safe_div, signed_power
+        ts_rank, ts_decay_linear, ts_cov, ts_corr, cs_rank, cs_demean, cs_zscore, safe_div, signed_power,
+        ts_median, ts_quantile, ts_skew, ts_kurt, ts_ema, ts_argmax, ts_argmin,
+        ts_pct_change, ts_minmax_norm, cs_scale, cs_winsorize, cs_quantile,
+        cs_neutralize, signed_log, safe_log, safe_sqrt, sigmoid, clamp,
+        min_of, max_of, ifelse, gt, ge, lt, le, eq, and_op, or_op, not_op,
+        mean_of, weighted_sum, combine_rank,
     )
 
     pv = data_hub.pv_15m
@@ -51,29 +61,56 @@ def compute_formula(formula_text, data_hub):
         'delta': delta,
         'ts_mean': ts_mean, 'ts_std': ts_std, 'ts_sum': ts_sum,
         'ts_max': ts_max, 'ts_min': ts_min,
+        'ts_median': ts_median, 'ts_quantile': ts_quantile,
+        'ts_skew': ts_skew, 'ts_kurt': ts_kurt, 'ts_ema': ts_ema,
+        'ts_argmax': ts_argmax, 'ts_argmin': ts_argmin,
+        'ts_pct_change': ts_pct_change, 'ts_minmax_norm': ts_minmax_norm,
         'ts_cov': ts_cov, 'ts_corr': ts_corr,
         'ts_zscore': ts_zscore, 'ts_rank': ts_rank,
         'ts_decay_linear': ts_decay_linear, 'decay_linear': ts_decay_linear,
+        'cs_scale': cs_scale, 'scale': cs_scale,
+        'cs_winsorize': cs_winsorize, 'winsorize': cs_winsorize,
+        'cs_quantile': cs_quantile, 'cs_neutralize': cs_neutralize,
         'safe_div': safe_div, 'div': safe_div,
         'signed_power': signed_power, 'pow': signed_power,
         'neg': lambda x: -x,
         'abs': lambda x: x.abs() if hasattr(x, 'abs') else np.abs(x),
-        'log': lambda x: np.log(np.abs(x) + 1) if not hasattr(x, 'apply') else x.abs().add(1).apply(np.log),
-        'signed_log': lambda x: np.sign(x) * np.log1p(np.abs(x)),
-        'sqrt': lambda x: np.sqrt(np.abs(x)) if not hasattr(x, 'apply') else x.abs().apply(np.sqrt),
+        'log': safe_log,
+        'signed_log': signed_log,
+        'sqrt': safe_sqrt,
         'sub': lambda a, b: a - b,
         'add': lambda a, b: a + b,
         'mul': lambda a, b: a * b,
-        'clip': lambda x, a, b: x.clip(a, b) if hasattr(x, 'clip') else np.clip(x, a, b),
-        'gt': lambda x, y: (x > y).astype(float),
-        'lt': lambda x, y: (x < y).astype(float),
-        'ifelse': lambda c, a, b: a.where(c > 0, b) if hasattr(a, 'where') else np.where(c > 0, a, b),
+        'clip': clamp, 'clamp': clamp,
+        'min_of': min_of, 'max_of': max_of,
+        'sigmoid': sigmoid, 'tanh': np.tanh,
+        'gt': gt, 'ge': ge, 'lt': lt, 'le': le, 'eq': eq,
+        'and_op': and_op, 'or_op': or_op, 'not_op': not_op,
+        'ifelse': ifelse,
         'sign': lambda x: np.sign(x) if not hasattr(x, 'apply') else x.apply(np.sign),
-        'scale': lambda x: cs_demean(x),  # simplified
-        'winsorize': lambda x, p=0.01: x.clip(x.quantile(p), x.quantile(1-p)) if hasattr(x, 'quantile') else x,
-        'mean_of': lambda *args: sum(args) / len(args),
-        'combine_rank': lambda *args: sum(cs_rank(a) for a in args) / len(args),
+        'mean_of': mean_of,
+        'weighted_sum': weighted_sum,
+        'combine_rank': combine_rank,
     })
+
+    # Register derived convenience fields after operators are available.
+    derived_formulas = {
+        "ret_1bar": "close_trade_px / delay(close_trade_px, 1) - 1",
+        "vwap_dev": "close_trade_px / vwap - 1",
+        "hl_range": "high_trade_px - low_trade_px",
+        "hl_range_pct": "div(sub(high_trade_px, low_trade_px), close_trade_px)",
+        "volume_ratio": "div(volume, ts_mean(volume, 20))",
+        "dollar_volume_ratio": "div(dvolume, ts_mean(dvolume, 20))",
+        "mid_spread": "sub(close_trade_px, close_mid_px)",
+        "order_flow_imbalance": "div(sub(buy_volume, sell_volume), add(buy_volume, sell_volume))",
+        "oi_pressure": "div(delta_oi, ts_mean(volume, 20))",
+        "book_pressure": "mean_of(book_imbalance, div(book_ofi, ts_mean(volume, 20)))",
+    }
+    for name, expr in derived_formulas.items():
+        try:
+            ns[name] = eval(expr, {"__builtins__": {}}, ns)
+        except Exception:
+            pass
 
     # Evaluate using restricted eval with namespace
     try:
@@ -116,6 +153,8 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
         submission_like = Evaluator.run_submission_like(alpha_aligned, resp_aligned, restriction_aligned)
     except Exception as e:
         return {'error': f'Evaluator failed: {e}'}
+
+    market_metrics = evaluate_factor_by_market(alpha_aligned, resp_aligned, restriction_aligned)
 
     # Flatten and map to expected format for frontend/leaderboard
     overall = metrics.get('overall', {})
@@ -174,7 +213,61 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
         'official_IR': submission_like.get('IR', 0),
         'official_Turnover': submission_like.get('Turnover', 0),
         'official_Score': submission_like.get('Score', 0),
+        'market_metrics': market_metrics,
     }
+
+
+def evaluate_factor_by_market(alpha_aligned, resp_aligned, restriction_aligned):
+    """Evaluate C/LH/M separately so futures factors can be kept per effective market."""
+    from core.evaluator import Evaluator
+
+    out = {}
+    securities = pd.Index(alpha_aligned.index.get_level_values("security_id")).astype(str)
+    products = pd.Series(securities.map(_contract_product), index=alpha_aligned.index)
+    for product in ("C", "LH", "M"):
+        mask = products.eq(product).to_numpy()
+        if not mask.any():
+            out[product] = {"available": False, "effective": False, "reason": "no contracts"}
+            continue
+        a = alpha_aligned.iloc[mask]
+        r = resp_aligned.reindex(a.index)
+        rest = restriction_aligned.reindex(a.index).fillna(0)
+        try:
+            metrics = Evaluator.run(a, r, rest)
+            cloud = Evaluator.run_submission_like(a, r, rest)
+        except Exception as exc:
+            out[product] = {"available": True, "effective": False, "reason": str(exc)}
+            continue
+        daily_ic = metrics.get("daily_ic", pd.Series(dtype=float))
+        rank_ic = float(metrics.get("rank_ic", 0.0) / 100.0)
+        ic = float(cloud.get("IC", 0.0) / 100.0)
+        ir = float(cloud.get("IR", 0.0))
+        dates = sorted(pd.to_datetime(a.index.get_level_values("date")).strftime("%Y-%m-%d").unique())
+        oos_ic = 0.0
+        if len(dates) >= 4 and isinstance(daily_ic, pd.Series) and not daily_ic.empty:
+            split = max(1, int(len(dates) * 0.7))
+            oos_dates = set(dates[split:])
+            oos = daily_ic[pd.to_datetime(daily_ic.index).strftime("%Y-%m-%d").isin(oos_dates)]
+            if not oos.empty:
+                oos_ic = float(oos.mean())
+        effective = bool(
+            np.isfinite(ic)
+            and np.isfinite(rank_ic)
+            and abs(rank_ic) >= 0.015
+            and (abs(ic) >= 0.0005 or abs(oos_ic) >= 0.0005)
+        )
+        out[product] = {
+            "available": True,
+            "effective": effective,
+            "IC": ic,
+            "RankIC": rank_ic,
+            "IR": ir,
+            "Turnover": float(cloud.get("Turnover", 0.0)),
+            "OOS_IC": oos_ic,
+            "days": len(dates),
+            "contracts": int(pd.Index(a.index.get_level_values("security_id")).nunique()),
+        }
+    return out
 
 
 def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothesis=None, data_hub=None):
@@ -240,6 +333,25 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothe
         result['eval_time'] = time.time() - t2
         result['status'] = 'success'
 
+        from paths import SUBMISSIONS_ROOT, FUTURE_ALPHA_ROOT
+        safe_name = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in factor_name)
+        out_dir = os.path.join(SUBMISSIONS_ROOT, safe_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        from core.futures_alpha import (
+            compute_existing_alpha_correlations,
+            export_future_alpha_format,
+            futures_research_score,
+        )
+        corr_report = compute_existing_alpha_correlations(
+            alpha,
+            factor_name,
+            out_dir=out_dir,
+        )
+        result['existing_alpha_correlation'] = corr_report
+        futures_score = futures_research_score(result, corr_report, result.get("market_metrics", {}))
+        result.update(futures_score)
+
         trading_days = hub.get_trading_days_list()
         sanity_report = SubmissionBuilder.pre_submit_sanity_check(
             alpha,
@@ -262,37 +374,63 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothe
         elif result.get('PassGates'):
             result['classification'] = 'Research Candidate'
             result['reason'] = 'Quality gates passed, but submission profile still needs fixing'
+        elif (
+            result.get("futures_score", 0.0) >= 20.0
+            or len([m for m in (result.get("market_metrics") or {}).values() if m.get("effective")]) >= 2
+        ) and corr_report.get("max_abs_corr", 1.0) < 0.75:
+            result['classification'] = 'Futures Research Candidate'
+            result['reason'] = 'Futures score and novelty thresholds passed; requires longer OOS confirmation'
 
         if result['submission_ready_flag']:
             result['recommendation'] = '[PASS] Passed gates — consider adding to research queue'
+        elif result['classification'] == 'Futures Research Candidate':
+            result['recommendation'] = '[FUTURES] Novel/effective in at least one futures market — queue for longer OOS validation'
         elif result['classification'] == 'Research Candidate':
             result['recommendation'] = '[CANDIDATE] Research candidate — worth further exploration'
         else:
             result['recommendation'] = '[DROP] Metrics too poor for submission'
             
-        import sys
-        if 'outputs.export_submission' not in sys.modules:
-            sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-        from outputs.export_submission import export_to_parquet
-
         desc = hypothesis or f"Quick test result for {factor_name}: {formula_text}"
-        out_path = export_to_parquet(
-            alpha,
-            factor_name,
-            metrics=result,
-            description=desc,
-            sanity_report=sanity_report,
-            hypothesis=hypothesis or desc,
-        )
+        out_path = os.path.join(out_dir, f"{safe_name}.parquet")
+        SubmissionBuilder.build(alpha.to_frame("alpha"), out_path)
+        effective_products = [
+            product
+            for product, item in (result.get("market_metrics") or {}).items()
+            if item.get("effective")
+        ]
+        should_export_future = bool(effective_products) and corr_report.get("max_abs_corr", 1.0) < 0.85
+        if os.environ.get("AUTOALPHA_FUTURES_EXPORT_EFFECTIVE_ONLY", "1") != "1":
+            effective_products = ["C", "LH", "M"]
+            should_export_future = True
+        future_alpha_paths = []
+        if should_export_future:
+            future_alpha_paths = export_future_alpha_format(
+                alpha,
+                safe_name,
+                out_root=FUTURE_ALPHA_ROOT,
+                products=effective_products,
+            )
+        result["effective_products"] = effective_products
+        result["future_alpha_export_paths"] = future_alpha_paths
+        meta_path = os.path.join(out_dir, f"{safe_name}_metadata.json")
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "factor_name": factor_name,
+                    "formula": formula_text,
+                    "description": desc,
+                    "hypothesis": hypothesis or desc,
+                    "metrics": {k: v for k, v in result.items() if k not in {"time_series", "validation", "compliance"}},
+                    "sanity_report": sanity_report,
+                },
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
         result['submission_path'] = out_path
         result['submission_dir'] = os.path.dirname(out_path)
-        # metadata filename follows storage_basename inside export_to_parquet
-        import glob
-
-        meta_glob = glob.glob(os.path.join(result['submission_dir'], '*_metadata.json'))
-        result['metadata_path'] = meta_glob[0] if meta_glob else os.path.join(
-            result['submission_dir'], f'{factor_name}_metadata.json'
-        )
+        result['metadata_path'] = meta_path
 
     except Exception as e:
         result['status'] = 'evaluation_failed'

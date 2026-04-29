@@ -40,7 +40,7 @@ export const Layout: React.FC<LayoutProps> = ({
             >
               <img src={logoSrc} alt="AutoAlpha logo" className="h-12 w-12 object-contain" />
               <div className="min-w-0">
-                <h1 className="truncate text-xl font-bold">AutoAlpha</h1>
+                <h1 className="truncate text-xl font-bold">AutoAlpha @ Future</h1>
                 <a
                   href="https://www.linkedin.com/in/shuoyin/"
                   target="_blank"

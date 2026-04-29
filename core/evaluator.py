@@ -130,6 +130,8 @@ def calc_turnover_wide(alpha_un):
 def filter_submission_times_wide(frame):
     if frame is None or frame.empty:
         return frame
+    if os.environ.get("AUTOALPHA_ASSET_CLASS", "futures").strip().lower() in {"future", "futures"}:
+        return frame
     datetimes = pd.to_datetime(frame.index.get_level_values('datetime'))
     mask = datetimes.strftime('%H:%M:%S').isin(ALLOWED_UTC_TIMES)
     return frame[mask]

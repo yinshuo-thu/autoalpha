@@ -87,12 +87,14 @@ def _get_eval_wide_frames(hub: DataHub, days: list[str]) -> tuple[pd.DataFrame, 
     if cached is not None:
         return cached
 
-    day_ts = [pd.to_datetime(d) for d in days]
+    day_keys = {pd.to_datetime(d).strftime("%Y-%m-%d") for d in days}
     resp_df = hub.resp
     rest_df = hub.trading_restriction
 
-    resp_slice = resp_df.loc[resp_df.index.get_level_values("date").isin(day_ts)]
-    rest_slice = rest_df.loc[rest_df.index.get_level_values("date").isin(day_ts)]
+    resp_dates = pd.to_datetime(resp_df.index.get_level_values("date")).strftime("%Y-%m-%d")
+    resp_slice = resp_df.loc[pd.Index(resp_dates).isin(day_keys)]
+    rest_dates = pd.to_datetime(rest_df.index.get_level_values("date")).strftime("%Y-%m-%d")
+    rest_slice = rest_df.loc[pd.Index(rest_dates).isin(day_keys)]
 
     resp_col = "resp" if "resp" in resp_df.columns else resp_df.columns[0]
     rest_col = "trading_restriction" if "trading_restriction" in rest_df.columns else rest_df.columns[0]
@@ -127,8 +129,10 @@ def _slice_pv_window(pv: pd.DataFrame, warmup_ts: pd.Timestamp, eval_end_ts: pd.
     if cached is not None:
         return cached
 
-    date_index = pv.index.get_level_values("date")
-    sub_pv = pv.loc[(date_index >= warmup_ts) & (date_index <= eval_end_ts)]
+    date_keys = pd.to_datetime(pv.index.get_level_values("date")).strftime("%Y-%m-%d")
+    warmup_key = warmup_ts.strftime("%Y-%m-%d")
+    eval_end_key = eval_end_ts.strftime("%Y-%m-%d")
+    sub_pv = pv.loc[(date_keys >= warmup_key) & (date_keys <= eval_end_key)]
     max_rows = int(os.environ.get("AUTOALPHA_PV_SLICE_CACHE_MAX_ROWS", "18000000") or 18_000_000)
     if len(sub_pv) <= max_rows:
         _PV_SLICE_CACHE[key] = sub_pv
@@ -324,7 +328,6 @@ def compute_alpha(
     warmup_start = all_days[warmup_idx]
 
     # Slice: warmup + eval window
-    eval_ts      = pd.to_datetime(eval_start)
     warmup_ts    = pd.to_datetime(warmup_start)
     eval_end_ts  = pd.to_datetime(eval_end)
 
@@ -339,9 +342,9 @@ def compute_alpha(
     alpha_pp = _postprocess(raw_alpha, postprocess_mode)
 
     # Trim to eval window only (drop warmup)
-    alpha_eval = alpha_pp.loc[
-        alpha_pp.index.get_level_values("date") >= eval_ts
-    ]
+    eval_key = pd.to_datetime(eval_start).strftime("%Y-%m-%d")
+    alpha_dates = pd.to_datetime(alpha_pp.index.get_level_values("date")).strftime("%Y-%m-%d")
+    alpha_eval = alpha_pp.loc[alpha_dates >= eval_key]
     return alpha_eval
 
 

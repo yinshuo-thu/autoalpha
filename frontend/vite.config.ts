@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, '')
   const backendUrl = env.AUTOALPHA_BACKEND_URL || 'http://127.0.0.1:8080'
   const backendWsUrl = env.AUTOALPHA_BACKEND_WS_URL || backendUrl.replace(/^http/i, 'ws')
-  const appBase = env.AUTOALPHA_APP_BASE || '/v3/'
+  const appBase = env.AUTOALPHA_APP_BASE || '/'
 
   return {
     base: appBase,
@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       host: true,
-      allowedHosts: ['autoalpha', 'autoalpha.cn'],
+      allowedHosts: ['autoalpha', 'autoalpha.cn', 'qrdev', 'localhost', '127.0.0.1'],
       proxy: {
         '/api': {
           target: backendUrl,

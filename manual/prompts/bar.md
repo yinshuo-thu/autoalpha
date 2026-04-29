@@ -54,7 +54,7 @@ cpl = ((vwap / mid) - 1)
 cpl_sq_ma = ts_mean((cpl ** 2), N)
 factor = (cpl_sq_ma ** 0.5)
 ```
-含义：围绕成交均价重心，刻画价格相对成交重心的偏离与迁移。
+含义：围绕成交均价重心，刻画价格相对成交重心的偏离与回归。
 
 ## fm11
 
@@ -464,7 +464,7 @@ vwapr1 = ((vwap / delay(vwap, N)) ** (1 / N))
 vwapr2 = ts_mean((vwap / delay(vwap, 1)), N)
 factor = ((vwapr1 - vwapr2) * 10000)
 ```
-含义：围绕成交均价重心，刻画价格相对成交重心的偏离与迁移。
+含义：围绕成交均价重心，刻画价格相对成交重心的偏离与回归。
 
 ## fm83
 
@@ -808,7 +808,7 @@ fenmu = ((sizeup_sum * numup_sum) + (sizedown_sum * numdown_sum))
 qbang[abs(fenmu) < 1e-09] = 0
 factor = qbang
 ```
-含义：围绕成交均价重心，刻画价格相对成交重心的偏离与迁移。
+含义：围绕成交均价重心，刻画价格相对成交重心的偏离与回归。
 
 ## fm124
 
@@ -828,7 +828,7 @@ fenmu = (sizeup_sum + sizedown_sum)
 qbang[abs(fenmu) < 1e-09] = 0
 factor = qbang
 ```
-含义：围绕成交均价重心，刻画价格相对成交重心的偏离与迁移。
+含义：围绕成交均价重心，刻画价格相对成交重心的偏离与回归。
 
 ## fm128
 
@@ -889,7 +889,7 @@ ama = ts_mean(vhl, N)
 bma = ts_mean(hl, N)
 factor = (ama / bma)
 ```
-含义：围绕成交均价重心，刻画价格相对成交重心的偏离与迁移。
+含义：围绕成交均价重心，刻画价格相对成交重心的偏离与回归。
 
 ## fm132
 
@@ -1432,7 +1432,6 @@ Formula:
 N = 2^k, k in period_id_list
 factor = rwi
 ```
-含义：Random Walk Index 风格指标，用真实波幅归一化价格向上/向下偏离，衡量趋势是否强于随机游走。
 
 ## dpo
 
@@ -1483,7 +1482,6 @@ cr = (hmsum / mlsum)
 cr[abs(mlsum) < 1e-05] = 0
 factor = cr
 ```
-含义：CR 指标风格的强弱比，衡量价格对前一周期中枢的上攻与下探力量。
 
 ## rsi
 
@@ -1492,7 +1490,6 @@ Formula:
 N = 2^k, k in period_id_list
 factor = rsi
 ```
-含义：RSI 风格的相对强弱指标，比较上涨幅度与总波动幅度。
 
 ## cmo
 
@@ -1569,7 +1566,6 @@ Formula:
 N = 2^k, k in period_id_list
 factor = sharp
 ```
-含义：Sharpe 风格指标，用均值/波动率衡量收益的风险调整后强度。
 
 ## ddi
 
@@ -1624,7 +1620,6 @@ fenmu = ((sizeup_sum * numup_sum) + (sizedown_sum * numdown_sum))
 qbang[abs(fenmu) < 1e-09] = 0
 factor = qbang
 ```
-含义：区间突破/强弱风格指标，衡量价格在历史区间中的攻击性。
 
 ## rank
 
@@ -1667,7 +1662,6 @@ sum_neg = ts_sum(dev_neg, N)
 fenmu = (sum_pos + sum_neg)
 factor = (sum_pos / fenmu)
 ```
-含义：Trend Intensity Index 风格指标，衡量价格相对趋势中枢的一致性。
 
 ## dmi
 
@@ -1683,7 +1677,6 @@ dmi = ((pdi - mdi) / (pdi + mdi))
 dmi[abs(fenmu) < 1e-05] = 0
 factor = dmi
 ```
-含义：Directional Movement Index 风格指标，比较正向与反向价格推进力度。
 
 ## wvad
 
@@ -1711,7 +1704,6 @@ dea = ts_mean(dif, N)
 macd = (dif - dea)
 factor = macd
 ```
-含义：MACD 风格指标，比较快慢均线差异，衡量趋势强弱与拐点。
 
 ## adx
 
@@ -1723,7 +1715,6 @@ tr = hl
 tr = ts_sum(tr, N)
 factor = adx
 ```
-含义：Average Directional Index 风格指标，衡量趋势方向强度而非涨跌方向本身。
 
 ## vhf
 
@@ -1747,7 +1738,6 @@ Formula:
 N = 2^k, k in period_id_list
 factor = mfi
 ```
-含义：Money Flow Index 风格指标，结合典型价格与成交量刻画资金流强弱。
 
 ## kdjd
 
@@ -1764,7 +1754,6 @@ stoch_min = ts_min(stoch, N)
 fenmu = (stoch_max - stoch_min)
 factor = ((stoch - stoch_min) / fenmu)
 ```
-含义：KDJ/D 指标风格，刻画价格在区间中的相对位置及平滑后的动量。
 
 ## pdi
 
@@ -1800,7 +1789,6 @@ sbm = ts_sum(dbm, N)
 fenmu = (stm + sbm)
 factor = ((stm - sbm) / fenmu)
 ```
-含义：ADTM 风格指标，比较开盘后向上扩张与向下扩张的力量差。
 
 ## abi
 
@@ -1830,7 +1818,6 @@ temp = (ts_mean(dire_vol, N) / ts_mean(vol, N))
 temp[ts_mean(vol, N) < 1e-09] = 0
 factor = temp
 ```
-含义：On-Balance Volume 风格指标，把量能按涨跌方向签名后累积，衡量量价同向性。
 
 ## up
 

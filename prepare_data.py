@@ -1,9 +1,11 @@
 """
-prepare_data.py — Real Data Loader & 15-Minute Resampler
+prepare_data.py — Futures Real Data Loader & 15-Minute Resampler
 
-Loads raw 1-minute parquet data from the competition dataset,
-resamples to 15-minute bars, and caches the result.
-Also loads universe, resp (eval-only), and trading_restriction (eval-only).
+Loads DCE futures order-flow reconstruction parquet files from
+AUTOALPHA_OFR_ROOT, aggregates tick-level contract records to 15-minute bars,
+and caches the result. Raw DCE CSV snapshots under AUTOALPHA_FUTURE_RAW_ROOT are
+kept as the original-data reference. Also builds a contract universe, next-day
+return resp (eval-only), and no-op trading_restriction (eval-only).
 
 Usage:
     python prepare_data.py                    # Precompute & cache
@@ -16,12 +18,11 @@ import glob
 import json
 import hashlib
 import argparse
-import re
 import warnings
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from paths import DATA_ROOT, CACHE_ROOT
+from paths import DATA_ROOT, CACHE_ROOT, FUTURE_RAW_ROOT, OFR_ROOT
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
@@ -33,14 +34,260 @@ ALLOWED_FIELDS = [
     'open_mid_px', 'high_mid_px', 'low_mid_px', 'close_mid_px',
     'open_trade_px', 'high_trade_px', 'low_trade_px', 'close_trade_px',
     'trade_count', 'volume', 'dvolume', 'vwap',
+    'open_interest', 'delta_oi', 'buy_volume', 'sell_volume', 'open_volume',
+    'close_volume', 'market_ofi', 'add_ofi', 'cancel_ofi', 'book_ofi',
+    'book_imbalance', 'spread', 'cvd',
 ]
 
 # ── FORBIDDEN for factor construction (eval-only) ──
 FORBIDDEN_FIELDS = ['resp', 'trading_restriction']
 
 
+def futures_mode():
+    return os.environ.get("AUTOALPHA_ASSET_CLASS", "futures").strip().lower() in {"future", "futures"}
+
+
+def _future_products():
+    raw = os.environ.get("AUTOALPHA_FUTURE_PRODUCTS", "C,LH,M").strip()
+    if not raw or raw == "*":
+        return None
+    return [p.strip().upper() for p in raw.split(",") if p.strip()]
+
+
+def _future_summary():
+    summary_path = os.path.join(OFR_ROOT, "reports", "checks", "contract_summary.csv")
+    if not os.path.exists(summary_path):
+        files = glob.glob(os.path.join(OFR_ROOT, "*", "_contract_summary.csv"))
+        if not files:
+            return pd.DataFrame()
+        dfs = []
+        for path in files:
+            try:
+                dfs.append(pd.read_csv(path))
+            except Exception:
+                pass
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    try:
+        return pd.read_csv(summary_path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _normalize_yyyymmdd(value):
+    text = str(value)
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    return pd.to_datetime(text).strftime("%Y-%m-%d")
+
+
+def _future_available_dates():
+    dates = set()
+    summary = _future_summary()
+    products = _future_products()
+    if not summary.empty and {"product", "first_date", "last_date"}.issubset(summary.columns):
+        if products:
+            summary = summary[summary["product"].astype(str).str.upper().isin(products)]
+        for _, row in summary.iterrows():
+            try:
+                rng = pd.date_range(_normalize_yyyymmdd(row["first_date"]), _normalize_yyyymmdd(row["last_date"]), freq="D")
+                dates.update(d.strftime("%Y-%m-%d") for d in rng)
+            except Exception:
+                continue
+
+    raw_day_dirs = glob.glob(os.path.join(FUTURE_RAW_ROOT, "[0-9]" * 8))
+    for path in raw_day_dirs:
+        name = os.path.basename(path)
+        if len(name) == 8 and name.isdigit():
+            dates.add(_normalize_yyyymmdd(name))
+    return sorted(dates)
+
+
+def _future_default_start_end(start=None, end=None):
+    dates = _future_available_dates()
+    if not dates:
+        return start or "2025-09-01", end or "2026-03-31"
+    if start is None or start == "2022-01-04":
+        days = int(os.environ.get("AUTOALPHA_FUTURE_DEFAULT_DAYS", "20") or 20)
+        start = dates[max(0, len(dates) - days)]
+    if end is None or end == "2024-12-31":
+        end = dates[-1]
+    return start, end
+
+
+def _future_contract_files(start, end):
+    summary = _future_summary()
+    products = _future_products()
+    if not summary.empty and "path" in summary.columns:
+        df = summary.copy()
+        if products and "product" in df.columns:
+            df = df[df["product"].astype(str).str.upper().isin(products)]
+        if "status" in df.columns:
+            df = df[df["status"].astype(str).str.lower().eq("ok")]
+        if {"first_date", "last_date"}.issubset(df.columns):
+            start_i = int(str(start).replace("-", ""))
+            end_i = int(str(end).replace("-", ""))
+            df = df[(df["last_date"].astype(int) >= start_i) & (df["first_date"].astype(int) <= end_i)]
+        paths = [p for p in df["path"].astype(str).tolist() if os.path.exists(p)]
+        return sorted(paths)
+    pattern = os.path.join(OFR_ROOT, "*", "*.parquet")
+    paths = [p for p in glob.glob(pattern) if not os.path.basename(p).startswith("_")]
+    if products:
+        paths = [p for p in paths if os.path.basename(os.path.dirname(p)).upper() in products]
+    return sorted(paths)
+
+
+def _future_bar_from_ofr(path, start, end):
+    columns = [
+        "trading_date", "timestamp", "contract", "price", "volume", "amount",
+        "vwap", "open_interest", "delta_oi", "mid", "spread", "buy_volume",
+        "sell_volume", "open_volume", "close_volume", "market_ofi", "add_ofi",
+        "cancel_ofi", "book_ofi", "book_imbalance", "cvd",
+    ]
+    start_key = str(start).replace("-", "")
+    end_key = str(end).replace("-", "")
+    try:
+        df = pd.read_parquet(
+            path,
+            columns=columns,
+            filters=[("trading_date", ">=", start_key), ("trading_date", "<=", end_key)],
+        )
+    except Exception as exc:
+        try:
+            df = pd.read_parquet(path, columns=columns)
+        except Exception as exc2:
+            print(f"Warning: Failed to read OFR parquet {path}: {exc2 or exc}")
+            return pd.DataFrame()
+    if df.empty:
+        return df
+    date_s = df["trading_date"].astype(str).map(_normalize_yyyymmdd)
+    mask = (date_s >= start) & (date_s <= end)
+    df = df.loc[mask].copy()
+    if df.empty:
+        return df
+    df["date"] = date_s.loc[mask].values
+    df["datetime"] = pd.to_datetime(df["timestamp"]).dt.floor("15min")
+    df["security_id"] = df["contract"].astype(str)
+    df["dvolume"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    if "mid" not in df or df["mid"].isna().all():
+        df["mid"] = df["price"]
+
+    sum_cols = [
+        "volume", "dvolume", "buy_volume", "sell_volume", "open_volume",
+        "close_volume", "market_ofi", "add_ofi", "cancel_ofi", "book_ofi",
+        "delta_oi",
+    ]
+    last_cols = ["open_interest", "spread", "book_imbalance", "cvd"]
+    agg = {
+        "price": ["first", "max", "min", "last"],
+        "mid": ["first", "max", "min", "last"],
+    }
+    for col in sum_cols:
+        if col in df.columns:
+            agg[col] = "sum"
+    for col in last_cols:
+        if col in df.columns:
+            agg[col] = "last"
+    grouped = df.groupby(["date", "datetime", "security_id"], sort=True).agg(agg)
+    grouped.columns = [
+        "_".join(c).rstrip("_") if isinstance(c, tuple) else c for c in grouped.columns
+    ]
+    grouped = grouped.rename(columns={
+        "price_first": "open_trade_px",
+        "price_max": "high_trade_px",
+        "price_min": "low_trade_px",
+        "price_last": "close_trade_px",
+        "mid_first": "open_mid_px",
+        "mid_max": "high_mid_px",
+        "mid_min": "low_mid_px",
+        "mid_last": "close_mid_px",
+    })
+    for col in sum_cols + last_cols:
+        sum_name = f"{col}_sum"
+        last_name = f"{col}_last"
+        if sum_name in grouped.columns and col not in grouped.columns:
+            grouped = grouped.rename(columns={sum_name: col})
+        if last_name in grouped.columns and col not in grouped.columns:
+            grouped = grouped.rename(columns={last_name: col})
+    grouped["trade_count"] = df.groupby(["date", "datetime", "security_id"], sort=True).size().astype("float32")
+    vol = grouped["volume"].replace(0, np.nan)
+    grouped["vwap"] = (grouped["dvolume"] / vol).where(vol.notna(), grouped["close_trade_px"])
+    return grouped[[c for c in ALLOWED_FIELDS if c in grouped.columns]].sort_index()
+
+
+def precompute_future_15m_cache(start=None, end=None, force=False):
+    start, end = _future_default_start_end(start, end)
+    products = ",".join(_future_products() or ["ALL"]).replace(",", "_")
+    cache_path = os.path.join(CACHE_DIR, f"future_ofr_15m_{products}_{start}_{end}.parquet")
+    if os.path.exists(cache_path) and not force:
+        print(f"[CACHE] Loading cached futures 15m data from {cache_path}")
+        return pd.read_parquet(cache_path)
+    paths = _future_contract_files(start, end)
+    print(f"[PREPARE] Futures OFR 15m cache {start} to {end}; contracts={len(paths)}")
+    frames = []
+    for i, path in enumerate(paths, 1):
+        frame = _future_bar_from_ofr(path, start, end)
+        if not frame.empty:
+            frames.append(frame)
+        if i % 5 == 0 or i == len(paths):
+            print(f"  [{i}/{len(paths)}] {os.path.basename(path)}")
+    if not frames:
+        raise RuntimeError(f"No futures OFR data loaded from {OFR_ROOT}. Check AUTOALPHA_OFR_ROOT/AUTOALPHA_FUTURE_PRODUCTS.")
+    df = pd.concat(frames).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.astype({c: "float32" for c in df.select_dtypes(include=["float64"]).columns})
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    df.to_parquet(cache_path, engine="pyarrow")
+    print(f"[PREPARE] Cached futures bars: {len(df):,} rows -> {cache_path}")
+    return df
+
+
+def precompute_future_resp_cache(start=None, end=None, force=False):
+    start, end = _future_default_start_end(start, end)
+    products = ",".join(_future_products() or ["ALL"]).replace(",", "_")
+    cache_path = os.path.join(CACHE_DIR, f"future_resp_{products}_{start}_{end}.parquet")
+    if os.path.exists(cache_path) and not force:
+        return pd.read_parquet(cache_path)
+    bars = precompute_future_15m_cache(start, end, force=False)
+    daily = (
+        bars["close_trade_px"]
+        .groupby(["date", "security_id"], sort=True)
+        .last()
+        .unstack("security_id")
+        .sort_index()
+    )
+    resp = daily.shift(-1).div(daily).sub(1.0).stack().rename("resp").to_frame()
+    resp.index = resp.index.set_names(["date", "security_id"])
+    resp.to_parquet(cache_path, engine="pyarrow")
+    return resp
+
+
+def precompute_future_tr_cache(start=None, end=None, force=False):
+    start, end = _future_default_start_end(start, end)
+    products = ",".join(_future_products() or ["ALL"]).replace(",", "_")
+    cache_path = os.path.join(CACHE_DIR, f"future_tr_{products}_{start}_{end}.parquet")
+    if os.path.exists(cache_path) and not force:
+        return pd.read_parquet(cache_path)
+    resp = precompute_future_resp_cache(start, end, force=False)
+    tr = pd.DataFrame({"trading_restriction": 0.0}, index=resp.index)
+    tr.to_parquet(cache_path, engine="pyarrow")
+    return tr
+
+
+def load_future_universe(start=None, end=None):
+    bars = precompute_future_15m_cache(start, end, force=False)
+    idx = bars.reset_index()[["date", "security_id"]].drop_duplicates()
+    idx["is_universe"] = True
+    return idx.set_index(["date", "security_id"]).sort_index()
+
+
 def get_trading_days(start='2022-01-04', end='2024-12-31'):
     """Get all trading days from basic_pv directory structure."""
+    if futures_mode():
+        start, end = _future_default_start_end(start, end)
+        return [d for d in _future_available_dates() if start <= d <= end]
+
     pv_root = os.path.join(DATA_ROOT, 'eq_data_stage1', 'basic_pv')
     days = []
     for year in sorted(os.listdir(pv_root)):
@@ -148,90 +395,22 @@ def load_trading_restriction(date_str):
     return None
 
 
-def _cache_path(prefix, start, end):
-    return os.path.join(CACHE_DIR, f'{prefix}_{start}_{end}.parquet')
-
-
-def _parse_cache_window(path, prefix):
-    """Return (start_ts, end_ts) for cache files named prefix_YYYY-MM-DD_YYYY-MM-DD.parquet."""
-    name = os.path.basename(path)
-    expected = f"{prefix}_"
-    if not name.startswith(expected) or not name.endswith(".parquet"):
-        return None
-    body = name[len(expected):-len(".parquet")]
-    try:
-        start_s, end_s = body.rsplit("_", 1)
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_s):
-            return None
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_s):
-            return None
-        return pd.Timestamp(start_s), pd.Timestamp(end_s)
-    except Exception:
-        return None
-
-
-def _find_superset_cache(prefix, start, end):
-    """Find the smallest existing cache whose date window covers start/end."""
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    candidates = []
-    for path in glob.glob(os.path.join(CACHE_DIR, f"{prefix}_*.parquet")):
-        parsed = _parse_cache_window(path, prefix)
-        if parsed is None:
-            continue
-        cache_start, cache_end = parsed
-        if cache_start <= start_ts and cache_end >= end_ts:
-            span_days = (cache_end - cache_start).days
-            candidates.append((span_days, path, cache_start, cache_end))
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: (item[0], item[1]))[0]
-
-
-def _load_cache_window(prefix, label, start, end, force=False):
-    exact_path = _cache_path(prefix, start, end)
-    if os.path.exists(exact_path) and not force:
-        print(f"[CACHE] Loading cached {label} from {exact_path}")
-        t0 = time.time()
-        df = pd.read_parquet(exact_path)
-        print(f"[CACHE] Loaded {len(df):,} {label} rows in {time.time()-t0:.1f}s")
-        return df
-
-    if force:
-        return None
-
-    superset = _find_superset_cache(prefix, start, end)
-    if superset is None:
-        return None
-    _, path, cache_start, cache_end = superset
-    print(
-        f"[CACHE] Loading {label} window {start} → {end} from superset "
-        f"{os.path.basename(path)} ({cache_start.date()} → {cache_end.date()})"
-    )
-    t0 = time.time()
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    try:
-        df = pd.read_parquet(path, filters=[("date", ">=", start_ts), ("date", "<=", end_ts)])
-    except Exception as exc:
-        print(f"[CACHE] Filtered parquet read failed for {label}: {exc}; falling back to in-memory slice")
-        df = pd.read_parquet(path)
-        if "date" in df.index.names:
-            dates = pd.to_datetime(df.index.get_level_values("date"))
-            df = df.loc[(dates >= start_ts) & (dates <= end_ts)]
-    print(f"[CACHE] Loaded {len(df):,} {label} rows in {time.time()-t0:.1f}s")
-    return df
-
-
 def precompute_15m_cache(start='2022-01-04', end='2024-12-31', force=False):
     """
     Precompute 15-minute resampled data and cache to disk.
     Returns the cached DataFrame.
     """
-    cache_path = _cache_path('pv_15m', start, end)
-    cached = _load_cache_window('pv_15m', '15m data', start, end, force)
-    if cached is not None:
-        return cached
+    if futures_mode():
+        return precompute_future_15m_cache(start, end, force)
+
+    cache_path = os.path.join(CACHE_DIR, f'pv_15m_{start}_{end}.parquet')
+
+    if os.path.exists(cache_path) and not force:
+        print(f"[CACHE] Loading cached 15m data from {cache_path}")
+        t0 = time.time()
+        df = pd.read_parquet(cache_path)
+        print(f"[CACHE] Loaded {len(df):,} rows in {time.time()-t0:.1f}s")
+        return df
 
     print(f"[PREPARE] Precomputing 15m data from {start} to {end}...")
     days = get_trading_days(start, end)
@@ -265,10 +444,14 @@ def precompute_15m_cache(start='2022-01-04', end='2024-12-31', force=False):
 
 def precompute_resp_cache(start='2022-01-04', end='2024-12-31', force=False):
     """Cache all resp data (for evaluation)."""
-    cache_path = _cache_path('resp', start, end)
-    cached = _load_cache_window('resp', 'resp', start, end, force)
-    if cached is not None:
-        return cached
+    if futures_mode():
+        return precompute_future_resp_cache(start, end, force)
+
+    cache_path = os.path.join(CACHE_DIR, f'resp_{start}_{end}.parquet')
+
+    if os.path.exists(cache_path) and not force:
+        print(f"[CACHE] Loading cached resp from {cache_path}")
+        return pd.read_parquet(cache_path)
 
     print(f"[PREPARE] Loading resp data...")
     days = get_trading_days(start, end)
@@ -287,10 +470,13 @@ def precompute_resp_cache(start='2022-01-04', end='2024-12-31', force=False):
 
 def precompute_tr_cache(start='2022-01-04', end='2024-12-31', force=False):
     """Cache all trading restriction data (for evaluation)."""
-    cache_path = _cache_path('tr', start, end)
-    cached = _load_cache_window('tr', 'trading restriction', start, end, force)
-    if cached is not None:
-        return cached
+    if futures_mode():
+        return precompute_future_tr_cache(start, end, force)
+
+    cache_path = os.path.join(CACHE_DIR, f'tr_{start}_{end}.parquet')
+
+    if os.path.exists(cache_path) and not force:
+        return pd.read_parquet(cache_path)
 
     days = get_trading_days(start, end)
     dfs = []
@@ -309,6 +495,8 @@ class DataHub:
     """Central data access point. Loads from cache or precomputes."""
 
     def __init__(self, start='2022-01-04', end='2024-12-31', force=False, use_mock=False):
+        if futures_mode():
+            start, end = _future_default_start_end(start, end)
         self.start = start
         self.end = end
         self._pv_15m = None
@@ -353,6 +541,8 @@ class DataHub:
         if self._universe is None:
             if self._use_mock:
                 self._universe = self._generate_mock_universe()
+            elif futures_mode():
+                self._universe = load_future_universe(self.start, self.end)
             else:
                 self._universe = load_universe()
         return self._universe
@@ -360,7 +550,7 @@ class DataHub:
     def _generate_mock_pv(self):
         print(f"[MOCK] Generating dummy 15m PV data...")
         dates = pd.date_range(self.start, self.end, freq='B')[:60]  # Increased to 60 days
-        secs = ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
+        secs = ['c2601', 'c2603', 'm2601', 'm2603', 'lh2601'] if futures_mode() else ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
         
         rows = []
         for d in dates:
@@ -383,7 +573,20 @@ class DataHub:
                         'trade_count': np.random.randint(100, 1000),
                         'volume': np.random.randint(10000, 100000),
                         'dvolume': np.random.uniform(1e5, 1e6),
-                        'vwap': np.random.uniform(9, 11)
+                        'vwap': np.random.uniform(9, 11),
+                        'open_interest': np.random.randint(100000, 500000),
+                        'delta_oi': np.random.randint(-1000, 1000),
+                        'buy_volume': np.random.randint(1000, 50000),
+                        'sell_volume': np.random.randint(1000, 50000),
+                        'open_volume': np.random.randint(1000, 50000),
+                        'close_volume': np.random.randint(1000, 50000),
+                        'market_ofi': np.random.uniform(-1e5, 1e5),
+                        'add_ofi': np.random.uniform(-1e5, 1e5),
+                        'cancel_ofi': np.random.uniform(-1e5, 1e5),
+                        'book_ofi': np.random.uniform(-1e5, 1e5),
+                        'book_imbalance': np.random.uniform(-1, 1),
+                        'spread': np.random.uniform(1, 3),
+                        'cvd': np.random.uniform(-1e6, 1e6),
                     })
         df = pd.DataFrame(rows)
         return df.set_index(['date', 'datetime', 'security_id']).sort_index()
@@ -391,7 +594,7 @@ class DataHub:
     def _generate_mock_resp(self):
         print(f"[MOCK] Generating dummy resp data...")
         dates = pd.date_range(self.start, self.end, freq='B')[:60] # Increased to 60 days
-        secs = ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
+        secs = ['c2601', 'c2603', 'm2601', 'm2603', 'lh2601'] if futures_mode() else ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
         rows = []
         for d in dates:
             d_str = d.strftime('%Y-%m-%d')
@@ -403,7 +606,7 @@ class DataHub:
     def _generate_mock_universe(self):
         print(f"[MOCK] Generating dummy universe...")
         dates = pd.date_range(self.start, self.end, freq='B')[:60] # Increased to 60 days
-        secs = ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
+        secs = ['c2601', 'c2603', 'm2601', 'm2603', 'lh2601'] if futures_mode() else ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '000858.SZ']
         rows = []
         for d in dates:
             d_str = d.strftime('%Y-%m-%d')

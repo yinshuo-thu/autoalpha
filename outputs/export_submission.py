@@ -109,7 +109,7 @@ def export_to_parquet(
             df["datetime"] = df["datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
         df["datetime"] = df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    df["security_id"] = df["security_id"].astype(int)
+    df["security_id"] = df["security_id"].astype(str)
 
     # Keep only the required columns
     df = df[["date", "datetime", "security_id", "alpha"]]

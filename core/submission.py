@@ -54,7 +54,7 @@ class SubmissionBuilder:
 
         date_vals = pd.to_datetime(alpha_df.index.get_level_values("date")).normalize()
         datetime_vals = pd.to_datetime(alpha_df.index.get_level_values("datetime"), utc=True).tz_localize(None)
-        security_vals = pd.Index(alpha_df.index.get_level_values("security_id")).astype("int64")
+        security_vals = pd.Index(alpha_df.index.get_level_values("security_id")).astype(str)
 
         normalized = alpha_df.copy()
         normalized.index = pd.MultiIndex.from_arrays(
@@ -198,7 +198,7 @@ class SubmissionBuilder:
                 securities = (
                     univ_chunk.loc[univ_chunk["date"] == day, "security_id"]
                     .drop_duplicates()
-                    .astype(int)
+                    .astype(str)
                     .tolist()
                 )
                 if not securities:
@@ -246,7 +246,7 @@ class SubmissionBuilder:
 
         df_export["date"] = pd.to_datetime(df_export["date"]).dt.strftime("%Y-%m-%d")
         df_export["datetime"] = pd.to_datetime(df_export["datetime"], utc=True).dt.tz_localize(None).dt.strftime("%Y-%m-%d %H:%M:%S")
-        df_export["security_id"] = df_export["security_id"].astype(int)
+        df_export["security_id"] = df_export["security_id"].astype(str)
         df_export["alpha"] = pd.to_numeric(df_export["alpha"], errors="coerce").clip(-1.0, 1.0)
         df_export = df_export[['date', 'datetime', 'security_id', 'alpha']]
         

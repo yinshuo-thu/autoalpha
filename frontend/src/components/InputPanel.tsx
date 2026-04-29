@@ -16,7 +16,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({ onSubmit, isRunning }) =
   const [config, setConfig] = useState<Partial<TaskConfig>>({
     numDirections: 2,
     maxRounds: 7,
-    market: 'csi500',
+    market: 'C,LH,M',
     parallelExecution: true,
     qualityGateEnabled: true,
   });
@@ -30,9 +30,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ onSubmit, isRunning }) =
   };
 
   const examplePrompts = [
-    '请帮我挖掘动量类因子，重点关注短期反转效应和成交量配合',
-    '探索价值因子与成长因子的组合策略，考虑行业中性化',
-    '基于技术指标构建因子，重点关注RSI和MACD的组合',
+    '请挖掘 DCE 期货订单流因子，重点关注 CVD、主动买卖量和 VWAP 偏离',
+    '探索持仓变化与成交量共振的期货趋势/反转因子，分别评估 C、LH、M',
+    '基于盘口不平衡、价差和波动压缩构建低相关期货因子',
   ];
 
   return (
@@ -125,12 +125,14 @@ export const InputPanel: React.FC<InputPanelProps> = ({ onSubmit, isRunning }) =
                   <select
                     value={config.market}
                     onChange={(e) =>
-                      setConfig({ ...config, market: e.target.value as 'csi500' | 'sp500' })
+                      setConfig({ ...config, market: e.target.value as 'C,LH,M' | 'C' | 'LH' | 'M' })
                     }
                     className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm"
                   >
-                    <option value="csi500">CSI 500 (中证500)</option>
-                    <option value="sp500">S&P 500</option>
+                    <option value="C,LH,M">DCE C/LH/M</option>
+                    <option value="C">DCE C</option>
+                    <option value="LH">DCE LH</option>
+                    <option value="M">DCE M</option>
                   </select>
                 </div>
 

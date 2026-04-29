@@ -7,6 +7,10 @@ import concurrent.futures
 import platform
 from paths import DATA_ROOT
 
+
+def _futures_mode():
+    return os.environ.get("AUTOALPHA_ASSET_CLASS", "futures").strip().lower() in {"future", "futures"}
+
 def _downcast_df(df):
     if df.empty: return df
     float_cols = df.select_dtypes(include=['float64']).columns
@@ -19,6 +23,10 @@ def _downcast_df(df):
 
 def get_trading_days(start=None, end=None):
     """Get sorted list of valid trading days."""
+    if _futures_mode():
+        from prepare_data import get_trading_days as _get_future_trading_days
+        return _get_future_trading_days(start or '2022-01-04', end or '2024-12-31')
+
     univ_path = os.path.join(DATA_ROOT, 'eq_data_stage1', 'universe', '*', 'data.pq')
     files = glob.glob(univ_path)
     if not files:
@@ -89,6 +97,12 @@ def _load_files_for_dates(base_path, dates, columns=None, index_cols=['date', 'd
     return pd.concat(dfs).sort_index()
 
 def load_universe(dates):
+    if _futures_mode():
+        from prepare_data import load_future_universe
+        if not dates:
+            return pd.DataFrame()
+        return load_future_universe(min(dates), max(dates))
+
     dfs = []
     univ_base = os.path.join(DATA_ROOT, 'eq_data_stage1', 'universe')
     years = list(set([pd.to_datetime(d).strftime('%Y') for d in dates]))
@@ -141,6 +155,16 @@ def resample_1m_to_15m(df):
     return grouped
 
 def load_pv_days(dates, columns=None):
+    if _futures_mode():
+        from prepare_data import precompute_future_15m_cache
+        if not dates:
+            return pd.DataFrame()
+        df = precompute_future_15m_cache(min(dates), max(dates), force=False)
+        if columns:
+            keep = [c for c in columns if c in df.columns]
+            return df[keep]
+        return df
+
     base_path = os.path.join(DATA_ROOT, 'eq_data_stage1', 'basic_pv')
     # Because 1m parquets can exceed 30GB when concatenated, we MUST resample inside threads BEFORE pd.concat
     df_15m = _load_files_for_dates(base_path, dates, columns, resample_first=True)
@@ -149,6 +173,12 @@ def load_pv_days(dates, columns=None):
     return df_15m
 
 def load_resp_days(dates):
+    if _futures_mode():
+        from prepare_data import precompute_future_resp_cache
+        if not dates:
+            return pd.DataFrame()
+        return precompute_future_resp_cache(min(dates), max(dates), force=False)
+
     base_path = os.path.join(DATA_ROOT, 'resp')
     if not os.path.exists(base_path):
         base_path = os.path.join(DATA_ROOT, 'eq_resp_stage1', 'resp')
@@ -157,6 +187,12 @@ def load_resp_days(dates):
     return _load_files_for_dates(base_path, dates)
 
 def load_restriction_days(dates):
+    if _futures_mode():
+        from prepare_data import precompute_future_tr_cache
+        if not dates:
+            return pd.DataFrame()
+        return precompute_future_tr_cache(min(dates), max(dates), force=False)
+
     base_path = os.path.join(DATA_ROOT, 'eq_trading_restriction_stage1', 'trading_restriction')
     if not os.path.exists(base_path):
         base_path = os.path.join(DATA_ROOT, 'eq_trading_restriction_stage1')

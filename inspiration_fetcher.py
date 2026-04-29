@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,12 +33,19 @@ from autoalpha_v3.inspiration_db import (
 
 # Broad scholarly search API. OpenAlex is not arXiv-specific and works without
 # an API key, so it gives the fetcher a wider outside-world idea surface.
+_ARXIV_API = "https://export.arxiv.org/api/query"
 _OPENALEX_API = "https://api.openalex.org/works"
+_ARXIV_QUERIES = [
+    'cat:q-fin.TR AND all:"futures" AND all:"order flow"',
+    'cat:q-fin.TR AND all:"commodity futures" AND all:"open interest"',
+    'cat:q-fin.PM AND all:"futures" AND all:"momentum"',
+    'cat:q-fin.ST AND all:"limit order book" AND all:"futures"',
+]
 _OPENALEX_QUERIES = [
-    "intraday stock return predictability order flow volume reversal",
-    "cross sectional stock returns momentum reversal liquidity factor",
-    "stock return prediction technical indicators volume price factor",
-    "market microstructure price impact order imbalance return prediction",
+    "commodity futures order flow imbalance return predictability",
+    "futures open interest volume momentum reversal factor",
+    "limit order book futures price impact order imbalance",
+    "intraday futures volatility liquidity price impact alpha",
 ]
 _VERBOSE_REJECTS = os.environ.get("AUTOALPHA_FETCHER_VERBOSE_REJECTS", "0").lower() in {
     "1",
@@ -47,14 +55,15 @@ _VERBOSE_REJECTS = os.environ.get("AUTOALPHA_FETCHER_VERBOSE_REJECTS", "0").lowe
 }
 
 _QUANT_PAPER_KEYWORDS = (
-    "stock return", "returns", "cross-section", "cross-sectional", "intraday",
+    "futures", "commodity", "commodity futures", "return", "returns", "intraday",
     "high-frequency", "momentum", "reversal", "liquidity", "volume",
-    "order flow", "order imbalance", "price impact", "volatility", "factor",
-    "anomaly", "predictability", "prediction", "forecast",
+    "open interest", "order flow", "order imbalance", "limit order book",
+    "price impact", "volatility", "factor", "anomaly", "predictability",
+    "prediction", "forecast",
 )
 _QUANT_PAPER_REJECT_KEYWORDS = (
     "cryptocurrency", "bitcoin", "option pricing", "credit risk", "textual",
-    "sentiment", "news", "esg", "climate", "macro", "fundamental only",
+    "sentiment", "news", "esg", "climate", "fundamental only",
 )
 
 # High-signal papers found through broad web/scholarly search.  These are kept as
@@ -62,88 +71,32 @@ _QUANT_PAPER_REJECT_KEYWORDS = (
 # search endpoint is temporarily unavailable.
 _CURATED_QUANT_PAPERS: List[Dict[str, str]] = [
     {
-        "title": "Intraday Patterns in the Cross-Section of Stock Returns",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1509466",
-        "published_date": "2010-05-26",
-        "summary": "Half-hour return continuation at daily lags, plus short-run reversal tied to temporary liquidity imbalance.",
-        "mechanism": "Test same-clock intraday continuation and sub-hour reversal using lagged 15-minute returns, volume, volatility and liquidity proxies.",
+        "title": "Price Discovery and Trading Volume in Commodity Futures",
+        "source": "https://ideas.repec.org/a/wly/jfutmk/v24y2004i11p1023-1038.html",
+        "published_date": "2004-11-01",
+        "summary": "Commodity futures price discovery is linked to volume and information arrival across nearby contracts.",
+        "mechanism": "Use volume and open-interest pressure to separate informed continuation from exhaustion in DCE contracts.",
     },
     {
-        "title": "How and When are High-Frequency Stock Returns Predictable?",
-        "source": "https://www.nber.org/papers/w30366",
-        "published_date": "2022-08-01",
-        "summary": "Ultra high-frequency stock returns and durations are predictable from recent price, volume and transaction events.",
-        "mechanism": "Build event-recency factors from short-horizon returns, trade counts, volume bursts and quote/trade activity.",
+        "title": "Order Flow and Exchange Rate Dynamics",
+        "source": "https://www.jstor.org/stable/2697779",
+        "published_date": "2002-02-01",
+        "summary": "Signed order flow explains short-horizon price dynamics and motivates flow-based predictors.",
+        "mechanism": "Translate signed volume, CVD and book OFI into continuation/exhaustion factors with OFR fields.",
     },
     {
-        "title": "Intraday Market Return Predictability Culled from the Factor Zoo",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4388560",
-        "published_date": "2023-03-14",
-        "summary": "Lagged high-frequency cross-sectional factor-zoo returns predict intraday aggregate market returns.",
-        "mechanism": "Compress cross-sectional lagged factor returns into regularized intraday predictors and separate continuous from jump-like moves.",
+        "title": "The Volume-Volatility Relation in Futures Markets",
+        "source": "https://www.sciencedirect.com/science/article/pii/0304405X89900215",
+        "published_date": "1989-01-01",
+        "summary": "Futures volatility and trading volume co-move through information arrival and liquidity demand.",
+        "mechanism": "Condition range or VWAP signals on abnormal volume and volatility compression/release states.",
     },
     {
-        "title": "Liquidity Risk and Expected Stock Returns",
-        "source": "https://www.nber.org/papers/w8462",
-        "published_date": "2001-09-01",
-        "summary": "Expected returns relate to liquidity sensitivity; liquidity is measured through order-flow-induced reversals.",
-        "mechanism": "Use return reversal after volume shocks as an illiquidity/liquidity-risk signal for cross-sectional ranking.",
-    },
-    {
-        "title": "Evaporating Liquidity",
-        "source": "https://www.nber.org/papers/w17653",
-        "published_date": "2011-12-01",
-        "summary": "Short-term reversal strategy returns proxy time-varying liquidity provision returns.",
-        "mechanism": "Condition reversal strength on recent volatility/liquidity stress using intraday range, turnover and short-lag return reversal.",
-    },
-    {
-        "title": "Liquidity and Autocorrelations in Individual Stock Returns",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=555968",
-        "published_date": "2005-01-12",
-        "summary": "Short-run reversals are strongest in high-turnover, low-liquidity stocks after controlling for trading volume.",
-        "mechanism": "Rank names by turnover-adjusted illiquidity and recent return autocorrelation to capture transient price pressure.",
-    },
-    {
-        "title": "Persistence or Reversal? The Effects of Abnormal Trading Volume on Stock Returns",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4346340",
-        "published_date": "2023-02-02",
-        "summary": "Abnormal trading volume predicts short-run persistence and longer-run reversal through volume persistence.",
-        "mechanism": "Measure abnormal volume persistence and interact it with recent return direction for drift-versus-reversal timing.",
-    },
-    {
-        "title": "Overnight Returns and the Timing of Trading Volume",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5004991",
-        "published_date": "2024-10-30",
-        "summary": "U-shaped intraday trading activity predicts higher overnight returns and links to overnight momentum.",
-        "mechanism": "Compare open/close volume concentration versus close-only concentration as an overnight continuation signal.",
-    },
-    {
-        "title": "Machine Learning Techniques for Cross-Sectional Equity Returns' Prediction",
-        "source": "https://link.springer.com/article/10.1007/s00291-022-00693-w",
-        "published_date": "2022-09-28",
-        "summary": "Machine learning improves cross-sectional equity return forecasts using lagged stock-level predictors.",
-        "mechanism": "Use nonlinear combinations of technical return, volatility, liquidity and volume features for cross-sectional ranking.",
-    },
-    {
-        "title": "Machine Learning Goes Global: Cross-Sectional Return Predictability in International Stock Markets",
-        "source": "https://www.sciencedirect.com/science/article/pii/S0165188923001318",
-        "published_date": "2023-10-01",
-        "summary": "Return predictability across global equities comes largely from momentum, reversal, value and size-style predictors.",
-        "mechanism": "Prioritize simple technical factor families such as momentum, reversal and liquidity before complex interactions.",
-    },
-    {
-        "title": "Machine Learning and The Cross-Section of Emerging Market Stock Returns",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4287550",
-        "published_date": "2023-03-13",
-        "summary": "Nonlinear and interaction-aware models outperform linear models for emerging-market stock return prediction.",
-        "mechanism": "Search interactions between recent return, volatility, turnover and liquidity constraints for underreaction signals.",
-    },
-    {
-        "title": "The Momentum Gap and Return Predictability",
-        "source": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2318858",
-        "published_date": "2019-02-28",
-        "summary": "The gap between winner and loser formation returns predicts future momentum profitability.",
-        "mechanism": "Use dispersion between recent winners and losers to gate momentum versus reversal factor exposure.",
+        "title": "Limit Order Book as a Market for Liquidity",
+        "source": "https://academic.oup.com/rfs/article-abstract/16/1/1/1584914",
+        "published_date": "2003-02-01",
+        "summary": "Limit order book supply and demand shape short-horizon price pressure and liquidity provision.",
+        "mechanism": "Use book imbalance, spread and add/cancel OFI as futures liquidity-pressure state variables.",
     },
 ]
 
@@ -192,14 +145,71 @@ def _paper_relevance_score(title: str, summary: str) -> tuple[bool, float, str]:
     text = f"{title} {summary}".lower()
     hits = [kw for kw in _QUANT_PAPER_KEYWORDS if kw in text]
     rejects = [kw for kw in _QUANT_PAPER_REJECT_KEYWORDS if kw in text]
-    has_return_signal = any(kw in text for kw in ("return", "predict", "forecast", "anomaly", "momentum", "reversal"))
-    has_market_micro = any(kw in text for kw in ("stock", "equity", "intraday", "volume", "liquidity", "order", "price"))
+    futures_specific = any(kw in text for kw in ("future", "futures", "commodity", "open interest", "contract"))
+    has_return_signal = any(kw in text for kw in ("return", "predict", "forecast", "anomaly", "momentum", "reversal", "price discovery"))
+    has_market_micro = any(kw in text for kw in ("futures", "intraday", "volume", "liquidity", "order", "price", "open interest", "book"))
     score = min(0.98, 0.25 + 0.07 * len(hits) - 0.12 * len(rejects))
-    keep = has_return_signal and has_market_micro and len(hits) >= 3 and score >= 0.62
+    min_hits = 2 if futures_specific else 3
+    min_score = 0.46 if futures_specific else 0.62
+    keep = has_return_signal and has_market_micro and len(hits) >= min_hits and score >= min_score
     reason = f"hits: {', '.join(hits[:8])}" if hits else "no quant-factor keyword hits"
     if rejects:
         reason += f"; rejects: {', '.join(rejects[:4])}"
     return keep, max(0.0, min(1.0, score)), reason
+
+
+def fetch_arxiv_futures_papers(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
+    """Fetch q-fin papers from arXiv as structured futures-factor inspirations."""
+    try:
+        resp = requests.get(
+            _ARXIV_API,
+            params={
+                "search_query": query,
+                "start": 0,
+                "max_results": min(max(max_results * 3, max_results), 50),
+                "sortBy": "relevance",
+                "sortOrder": "descending",
+            },
+            timeout=18,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        print(f"[fetcher] arXiv query failed: {exc}")
+        return []
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError as exc:
+        print(f"[fetcher] arXiv XML parse failed: {exc}")
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ns):
+        title = _trim_text(" ".join((entry.findtext("atom:title", default="", namespaces=ns) or "").split()), limit=140)
+        summary = _trim_text(" ".join((entry.findtext("atom:summary", default="", namespaces=ns) or "").split()), limit=700)
+        source = entry.findtext("atom:id", default="", namespaces=ns) or ""
+        published_date = (entry.findtext("atom:published", default="", namespaces=ns) or "")[:10]
+        keep, score, reason = _paper_relevance_score(title, summary)
+        if not keep:
+            if _VERBOSE_REJECTS:
+                print(f"[fetcher] arXiv screened out: {title} ({reason})")
+            continue
+        records.append(_quant_paper_record(
+            title=title,
+            source=source,
+            summary=summary,
+            mechanism=(
+                "arXiv q-fin futures paper candidate. Extract only explicit formulas, variables, "
+                f"and evaluation metrics before turning it into a factor; query={query}. {reason}"
+            ),
+            published_date=published_date,
+            tags="paper,arxiv,q-fin,futures,structured-search",
+            quality_score=score,
+        ))
+        if len(records) >= max_results:
+            break
+    return records
 
 
 def _quant_paper_record(
@@ -316,9 +326,18 @@ def fetch_curated_quant_papers(limit: int = 12) -> List[Dict[str, Any]]:
 
 
 def fetch_quant_papers(max_results: int = 12) -> List[Dict[str, Any]]:
-    """Combine broad live search with curated high-signal papers."""
+    """Combine arXiv q-fin search, broad live search, and curated high-signal papers."""
     records: List[Dict[str, Any]] = []
     seen_sources: set[str] = set()
+    for query in _ARXIV_QUERIES:
+        for rec in fetch_arxiv_futures_papers(query, max_results=4):
+            source = str(rec.get("source") or "")
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
+            records.append(rec)
+            if len(records) >= max_results:
+                return records
     for query in _OPENALEX_QUERIES:
         for rec in fetch_openalex_quant_papers(query, max_results=4):
             source = str(rec.get("source") or "")

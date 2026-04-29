@@ -278,8 +278,8 @@ export const BacktestPage: React.FC = () => {
             <Info className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
             <div className="text-sm space-y-1">
               <p className="text-muted-foreground">
-                独立回测在<strong className="text-foreground">测试集（2022-01-01 ~ 2025-12-26）</strong>上评估因子的样本外表现。
-                使用 CSI300 市场股票池，TopK Dropout 策略，LightGBM 模型。
+                独立回测在 DCE 期货 C/LH/M 的 15 分钟样本上评估因子的样本外表现。
+                使用期货合约面板、分品种指标和低相关性门控。
               </p>
               <p className="text-muted-foreground">
                 <strong className="text-foreground">custom</strong> 模式仅使用因子库中的自定义因子；

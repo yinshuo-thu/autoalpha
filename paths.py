@@ -3,6 +3,9 @@ import platform
 
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FUTURE_RAW_ROOT = "/mnt/v0a2d/jiayi/future/dce"
+DEFAULT_OFR_ROOT = "/mnt/nvme2/syin/OFR"
+DEFAULT_FUTURE_ALPHA_ROOT = "/mnt/v0a2d/jiayi/future/alpha"
 
 
 def _default_storage_root():
@@ -21,6 +24,8 @@ def _detect_data_root():
     env_root = os.environ.get("SCIENTECH_DATA_ROOT")
     if env_root:
         return os.path.abspath(os.path.expanduser(env_root))
+    if os.environ.get("AUTOALPHA_ASSET_CLASS", "futures").strip().lower() in {"future", "futures"}:
+        return _default_storage_root()
 
     candidates = [
         _default_storage_root(),
@@ -36,6 +41,9 @@ def _detect_data_root():
 
 STORAGE_ROOT = _default_storage_root()
 DATA_ROOT = _detect_data_root()
+FUTURE_RAW_ROOT = os.path.abspath(os.path.expanduser(os.environ.get("AUTOALPHA_FUTURE_RAW_ROOT", DEFAULT_FUTURE_RAW_ROOT)))
+OFR_ROOT = os.path.abspath(os.path.expanduser(os.environ.get("AUTOALPHA_OFR_ROOT", DEFAULT_OFR_ROOT)))
+FUTURE_ALPHA_ROOT = os.path.abspath(os.path.expanduser(os.environ.get("AUTOALPHA_FUTURE_ALPHA_ROOT", DEFAULT_FUTURE_ALPHA_ROOT)))
 OUTPUTS_ROOT = os.path.join(DATA_ROOT, "outputs")
 RESEARCH_ARTIFACTS_ROOT = os.path.join(DATA_ROOT, "research_runs")
 CACHE_ROOT = os.path.join(DATA_ROOT, "cache")

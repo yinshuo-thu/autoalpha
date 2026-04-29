@@ -2,9 +2,20 @@
 
 ![AutoAlpha v3 research cockpit](assets/images/v2.png)
 
-AutoAlpha v3 is an AI-assisted intraday alpha research factory for the Scientech Labs Equity Alpha Research workflow. It is not only a combo-result dashboard: the core of the project is a closed-loop factor mining system that turns research hypotheses into DSL formulas, validates them, evaluates them on 15-minute data, stores the research memory, and then studies single-factor and multi-factor OOS behavior.
+AutoAlpha v3 is an AI-assisted intraday futures alpha research factory for DCE commodity futures. It is not only a combo-result dashboard: the core of the project is a closed-loop factor mining system that turns research hypotheses into DSL formulas, validates them, evaluates them on 15-minute DCE contract data, stores the research memory, and then studies single-factor and multi-factor OOS behavior.
 
-The display frontend is currently used for local testing, live-trading style internal checks, and migration experiments on futures data. It is not publicly released for now.
+The display frontend is currently used for local testing, live-trading style internal checks, and futures mining experiments. It is not publicly released for now.
+
+## Current Futures Adaptation
+
+- Active branch: `fut`, based on upstream `v3`.
+- Raw DCE data: `/mnt/v0a2d/jiayi/future/dce`.
+- Order-flow reconstruction data: `/mnt/nvme2/syin/OFR`.
+- Existing futures alpha library: `/mnt/v0a2d/jiayi/future/alpha`.
+- Active products: `C`, `LH`, `M`.
+- New factors are evaluated by product, compared against existing futures alpha files for low correlation, visualized through CSV/JSON/PNG correlation reports, and exported in the same date/product parquet layout when retained.
+- Every project update must be recorded in `frontend/src/data/devTimeline.ts` through `scripts/add_timeline_entry.py`; Setting now shows the Timeline.
+- Paper inspirations use arXiv q-fin futures queries plus OpenAlex/curated fallback. The conversion rule follows the referenced paper-pipeline note: search structured metadata first, extract only explicit formulas/metrics/mechanisms, then translate into OFR-compatible variables without hallucinating paper details.
 
 ## Research Goal
 
@@ -18,7 +29,7 @@ The current implementation focuses on:
 - translating hypotheses into a constrained DSL formula language;
 - parsing formulas into ASTs so the system can inspect fields, operators, windows, and structure;
 - rejecting leakage-prone or invalid formulas before expensive evaluation;
-- computing factor files and official-like metrics including IC, IR, turnover/TVR, concentration, coverage, and score;
+- computing factor files and futures metrics including IC/RankIC, IR, turnover/TVR, market breadth, OOS stability, and novelty versus existing alpha files;
 - saving passing and failing attempts into a knowledge base for later retrieval;
 - using RAG and generation experience to steer the next mining rounds;
 - combining mined factors with rank-based ensembles and ML meta-models under chronological train/validation/OOS splits;
@@ -85,26 +96,23 @@ The display layer is intended for local/internal review of the mining process, f
 
 ## Data Basis
 
-The current v3 stock results use real, processed A-share intraday data covering
-`2022-01-04` to `2024-12-31`. The mining pipeline resamples the original
-1-minute panel to 15-minute bars, keeps `resp` and `trading_restriction` as
-evaluation-only fields, and never uses 2024 labels for factor or model
-selection.
+The active data basis is DCE futures order-flow reconstruction. `prepare_data.py`
+loads OFR parquet files, aggregates contract records to 15-minute bars, builds a
+contract universe, and creates next-day contract returns for local evaluation.
+`resp` and `trading_restriction` remain evaluation-only fields and are forbidden
+in factor construction.
 
-| Data slice | Period | Trading days | Rows | Securities | Notes |
-| --- | --- | ---: | ---: | ---: | --- |
-| Discovery / in-sample | 2022-01-04 to 2023-12-29 | 484 | 42.40M | 5,183 | Used for factor discovery, gates, model training, and validation. |
-| OOS verification | 2024-01-02 to 2024-12-31 | 242 | 22.20M | 5,170 | Held out for overfit checks and model OOS reporting. |
-| Full processed panel | 2022-01-04 to 2024-12-31 | 726 | 64.60M | 5,260 | 15-minute OHLCV-style A-share panel with 15 columns. |
+| Data slice | Location | Notes |
+| --- | --- | --- |
+| Raw DCE files | `/mnt/v0a2d/jiayi/future/dce` | Original futures data reference. |
+| OFR bars | `/mnt/nvme2/syin/OFR` | Source for 15-minute contract bars and order-flow fields. |
+| Existing alpha library | `/mnt/v0a2d/jiayi/future/alpha` | Used for novelty/correlation checks and format matching. |
+| Runtime outputs | `/mnt/nvme2/syin/data/outputs` | Local cache, quick-test reports, correlation plots, and fallback future-alpha exports. |
 
-Local storage scale from the current machine:
-
-- `/Volumes/T7/data`: about `107G`, including raw competition-style parquet and cache files.
-- `/Volumes/T7/data/cache`: about `6.0G`.
-- Full 2022-2024 processed cache (`pv_15m`, `resp`, `trading_restriction`):
-  about `4.34 GiB` compressed parquet on disk and `4.70 GiB` parquet logical
-  uncompressed size.
-- The duplicated 2024 OOS cache is about `1.49 GiB` compressed parquet on disk.
+Allowed factor fields include OHLC/VWAP/trade count plus futures-specific
+`open_interest`, `delta_oi`, `buy_volume`, `sell_volume`, `open_volume`,
+`close_volume`, `market_ofi`, `add_ofi`, `cancel_ofi`, `book_ofi`,
+`book_imbalance`, `spread`, and `cvd`.
 
 ## Current Mining Results
 

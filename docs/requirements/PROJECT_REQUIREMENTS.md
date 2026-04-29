@@ -1,6 +1,21 @@
-# Alpha Quantitative Challenge - Core Requirements and Data Specification
+# AutoAlpha Futures - Core Requirements and Data Specification
 
-This document outlines the core requirements, timeline, evaluation criteria, and dataset specifications for the Scientech Alpha Quantitative Challenge. It serves as the primary reference guide for AI development and quantitative modeling on this project.
+## Current Project Mandate
+
+- The active research mode is pure DCE futures factor mining for products `C`, `LH`, and `M`.
+- Every code, prompt, data-path, configuration, and README update must add a corresponding entry to `frontend/src/data/devTimeline.ts` through `scripts/add_timeline_entry.py`.
+- Raw DCE data lives under `/mnt/v0a2d/jiayi/future/dce`; order-flow reconstruction data lives under `/mnt/nvme2/syin/OFR`; existing futures alpha files live under `/mnt/v0a2d/jiayi/future/alpha`.
+- New factors must be evaluated by product, compared against existing futures alpha files for correlation/novelty, and exported in the same per-date/per-product format when retained.
+- The old stock Score is no longer the primary ranker. Futures ranking prioritizes RankIC/IC stability, OOS persistence, low existing-alpha correlation, turnover reasonableness, and market breadth across C/LH/M.
+
+## Futures Data Specification
+
+- **OFR bars**: contract-level 15-minute bars aggregated from reconstructed order-flow parquet files.
+- **Allowed fields**: OHLC/VWAP/trade count plus futures-specific fields including `open_interest`, `delta_oi`, `buy_volume`, `sell_volume`, `open_volume`, `close_volume`, `market_ofi`, `add_ofi`, `cancel_ofi`, `book_ofi`, `book_imbalance`, `spread`, and `cvd`.
+- **Evaluation target**: next-day contract close return generated locally from OFR bars. It is evaluation-only and must never be used in factor construction.
+- **Retention rule**: record effective products explicitly, for example `LH,M`, because a factor can be useful in one futures market and invalid in another.
+
+The legacy challenge notes below are retained only for historical context. Active development follows the futures mandate above.
 
 ## 1. Challenge Overview
 

@@ -95,11 +95,13 @@ def _runtime_int(cfg: dict[str, str], key: str, default: int) -> int:
         return default
 
 SYSTEM_PROMPT_COMPACT = """\
-You are a senior quantitative alpha researcher for 15-minute A-share equities.
+You are a senior quantitative alpha researcher for 15-minute Chinese commodity futures.
 Return ONE factor as raw JSON only.
 
 Allowed fields:
-open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap
+open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap,
+open_interest, delta_oi, buy_volume, sell_volume, open_volume, close_volume,
+market_ofi, add_ofi, cancel_ofi, book_ofi, book_imbalance, spread, cvd
 
 Allowed operators:
 lag, delta, ts_pct_change, ts_mean, ts_ema, ts_std, ts_sum, ts_max, ts_min, ts_median,
@@ -301,11 +303,13 @@ def _auto_compact_sections(
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-You are a senior quantitative alpha researcher for intraday A-share equities.
-Generate ONE original 15-minute alpha factor in JSON only.
+You are a senior quantitative alpha researcher for intraday Chinese commodity futures.
+Generate ONE original 15-minute futures alpha factor in JSON only.
 
 # EXACT DSL (these names only)
-Fields   : open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap
+Fields   : open_trade_px, high_trade_px, low_trade_px, close_trade_px, trade_count, volume, dvolume, vwap,
+           open_interest, delta_oi, buy_volume, sell_volume, open_volume, close_volume,
+           market_ofi, add_ofi, cancel_ofi, book_ofi, book_imbalance, spread, cvd
 Time-series: lag(x,d), delta(x,d), ts_pct_change(x,d), ts_mean(x,d), ts_ema(x,d),
              ts_std(x,d), ts_sum(x,d), ts_max(x,d), ts_min(x,d), ts_median(x,d),
              ts_quantile(x,d,q), ts_zscore(x,d), ts_rank(x,d), ts_minmax_norm(x,d),
@@ -332,11 +336,10 @@ Infix      : +, -, *, /
 - Prefer smooth operators over hard conditions unless the condition encodes a clear regime filter.
 
 # RESEARCH GOAL
-- Prefer signals that can realistically pass competition gates on 2022-2023 discovery data.
-- 2024 OOS is reported only after discovery; never infer from or optimize to 2024 feedback.
-- Build signals with a market mechanism in mind: price-vs-vwap mean reversion, range-location
-  persistence, failed breakout, intraday continuation with volume confirmation, volatility
-  compression / release, or short-horizon reversal after exhaustion.
+- Prefer signals that are robust across DCE C, LH and M contracts and survive out-of-sample checks.
+- Build signals with a futures market mechanism in mind: order-flow imbalance, CVD exhaustion,
+  open-interest pressure, main/nearby contract participation, price-vs-vwap reversion,
+  range-location persistence, failed breakout, volume-confirmed continuation, or liquidity stress.
 - Prefer a structure like signal core + stabilizer + cross-sectional normalization.
 - TURNOVER IS THE #1 KILLER: outer smoother window MUST be >= 10 bars.
   ts_decay_linear(x, 2) or ts_decay_linear(x, 3) produces TVR > 700 — FATAL, will not pass.
@@ -347,13 +350,14 @@ Infix      : +, -, *, /
   liquidity-neutral residuals via cs_neutralize, and multi-leg blends via mean_of/combine_rank.
 - Aim for diversity versus prior factors. Do not paraphrase existing formulas.
 - Novelty is mandatory across at least 2 axes: mechanism, baseline, operator chain, or field pairing.
-- Low correlation is mandatory: choose orthogonal mechanisms and field pairings so max |corr| <= 0.72
-  against accepted v3 factors, not merely a different constant or lookback.
+- Low correlation is mandatory: choose orthogonal mechanisms and field pairings so max |corr|
+  against existing futures alpha files stays low, not merely a different constant or lookback.
 - Favor full coverage, low concentration, and stable cross-sectional behavior.
 
-# COMPETITION GATES
-IC > 0.6, IR > 2.5, Turnover < 330 (local target), low-correlation gate <= 0.72, full 2022-2023 discovery coverage.
-Turnover is the dominant failure — tested formulas average TVR > 700. Fix: use window >= 10.
+# FUTURES RESEARCH GATES
+RankIC/IC must be stable by product, at least one market should be effective, max existing-alpha
+correlation should stay below novelty thresholds, and OOS bars must not collapse. Turnover remains
+important, but novelty and cross-product robustness replace the legacy Score as the main ranker.
 
 # OUTPUT
 Return ONLY raw JSON:
@@ -367,7 +371,7 @@ Return ONLY raw JSON:
 
 # Stage-1 system prompt for hypothesis generation (AlphaLogics-inspired)
 _HYPOTHESIS_SYSTEM = """\
-You are a quantitative research strategist for intraday A-share equities.
+You are a quantitative research strategist for intraday Chinese commodity futures.
 Your job is to articulate a specific, testable market mechanism hypothesis.
 Do NOT write formulas. Focus on the "why" — the economic or behavioral logic.
 
@@ -396,7 +400,7 @@ ARCHETYPES = [
 EXPLORATION_ARCHETYPES = [
     ("mean_reversion", "new paper-derived microstructure anomaly unlike current parents"),
     ("volume_signal", "LLM brainstormed orthogonal field interaction with low formula correlation"),
-    ("momentum", "factor-prompt market mechanism translated conservatively to equities"),
+    ("momentum", "factor-prompt market mechanism translated conservatively to futures"),
     ("volatility", "rare regime filter using range, liquidity, and participation divergence"),
 ]
 
@@ -959,7 +963,7 @@ def _generate_hypothesis(
         )
 
     sections.append(
-        "Describe a NEW intraday A-share market mechanism. "
+        "Describe a NEW intraday DCE futures market mechanism. "
         "Be specific: name the phenomenon, the cause, and the expected time-horizon. "
         "Suggest 1-3 DSL fields that best capture it. Output JSON only."
     )
