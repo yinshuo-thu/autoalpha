@@ -9,6 +9,15 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-29T07:43:11+00:00',
+    title: '忽略本地 loop 运行状态文件',
+    summary: '将 knowledge.json 与 loop_state.json 作为本地挖掘运行状态加入 .gitignore，避免后台挖掘产生的运行文件污染源码分支。',
+    tags: ['Git', 'Runtime'],
+    bullets: [
+      '后台挖掘 PID 933995 正在运行，状态文件保留在本地但不进入 Git。',
+    ],
+  },
+  {
     timestamp: '2026-04-29T07:38:28+00:00',
     title: 'Pipeline discovery 窗口适配期货日期',
     summary: '修复 v3 loop 仍假设 2022-2023 discovery 的问题；当期货数据不在旧日期窗内时，自动按当前可用交易日切分 discovery/OOS。',

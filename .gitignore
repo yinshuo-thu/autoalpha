@@ -103,6 +103,8 @@ output/
 submit/
 model_lab/
 process_logs/
+knowledge.json
+loop_state.json
 manual/artifacts/
 manual/reports/
 manual/submit/
