@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       host: true,
-      allowedHosts: ['autoalpha', 'autoalpha.cn', 'qrdev', 'localhost', '127.0.0.1'],
+      allowedHosts: true,
       proxy: {
         '/api': {
           target: backendUrl,

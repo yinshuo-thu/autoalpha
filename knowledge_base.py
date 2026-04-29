@@ -942,11 +942,9 @@ def _failure_reason(item: Dict[str, Any]) -> str:
         return "duplicate_formula"
     if status == "screened_out":
         return "screened_out"
-    if float(item.get("tvr", 0) or 0) >= 330:
-        return "high_tvr"
-    if float(item.get("IR", 0) or 0) <= 2.5:
-        return "low_ir"
-    if float(item.get("IC", 0) or 0) <= 0.6:
+    if abs(float(item.get("IR", item.get("ICIR", 0)) or 0)) <= 1.0:
+        return "low_icir"
+    if abs(float(item.get("IC", 0) or 0)) <= 0.02:
         return "low_ic"
     if float(item.get("Score", 0) or 0) <= 0:
         return "zero_score"
@@ -1252,30 +1250,22 @@ def get_generation_guidance(
         if rec.get("attempts", 0) >= 3 and rec.get("wins", 0) == 0
     ][:6]
 
-    # TVR dominance alert — check screened_out + ok failures for high TVR
     all_non_passing = [
         item for item in recent
         if item.get("status") in ("ok", "screened_out") and not item.get("PassGates")
     ]
-    tvr_failures = [f for f in all_non_passing if float(f.get("tvr", 0) or 0) >= 330]
     failure_modes = Counter(_failure_reason(item) for item in all_non_passing)
     dominant_failure_mode = failure_modes.most_common(1)[0][0] if failure_modes else ""
     duplicate_count = sum(1 for item in recent if item.get("status") == "duplicate")
-    tvr_alert: str = ""
-    if all_non_passing and len(tvr_failures) / len(all_non_passing) >= 0.4:
-        avg_tvr = sum(float(f.get("tvr", 0) or 0) for f in tvr_failures) / len(tvr_failures)
-        tvr_alert = (
-            f"CRITICAL TVR ALERT: {len(tvr_failures)}/{len(all_non_passing)} recent non-passing factors "
-            f"failed due to TVR >= 330 (avg TVR={avg_tvr:.0f}). "
-            "Root cause: outer smoother window too short. "
-            "REQUIRED: wrap the final signal with ts_mean(x,10), ts_decay_linear(x,15), or ts_ema(x,10). "
-            "Any formula with ts_decay_linear window < 8 will produce TVR > 500."
+    stability_alert = ""
+    if all_non_passing and failure_modes.get("low_icir", 0) / len(all_non_passing) >= 0.4:
+        stability_alert = (
+            f"H60 STABILITY ALERT: {failure_modes.get('low_icir', 0)}/{len(all_non_passing)} recent non-passing factors "
+            "failed because raw h60 ICIR was weak. Use clearer order-flow/open-interest/VWAP mechanisms, "
+            "avoid pure one-bar noise, and validate per C/LH/M market."
         )
         if duplicate_count >= 3:
-            tvr_alert += (
-                f" Additionally {duplicate_count}/{len(recent)} recent attempts were duplicates — "
-                "generate structurally novel formulas."
-            )
+            stability_alert += f" Also {duplicate_count}/{len(recent)} recent attempts were duplicates; generate structurally novel formulas."
 
     return {
         "existing_formula_keys": get_existing_formula_keys(),
@@ -1312,7 +1302,7 @@ def get_generation_guidance(
         "exhausted_families": exhausted_families,
         "generation_experience_context": compose_recent_generation_experience_context(),
         "dominant_failure_mode": dominant_failure_mode,
-        "tvr_alert": tvr_alert,
+        "stability_alert": stability_alert,
     }
 
 
@@ -1395,25 +1385,21 @@ def get_top_parents(k: int = 4, min_ic: float = 0.2) -> List[Dict[str, Any]]:
             seen_fingerprints.add(formula_structural_fingerprint(item.get("formula", "")))
             seen_sources.add(str(item.get("inspiration_source_type", "")))
     else:
-        # Prefer low-TVR factors as fallback — high-TVR failures teach LLM the wrong patterns.
-        # Never use factors with TVR > 400 as parents: they reinforce bad smoothing habits.
-        low_tvr = [
+        signal_positive = [
             f for f in all_factors
-            if float(f.get("tvr", 0) or 0) < 400
-            and float(f.get("IC", 0) or 0) > 0
+            if abs(float(f.get("IC", 0) or 0)) >= min_ic
         ]
-        for item in sorted(low_tvr, key=lambda x: x.get("IC", 0), reverse=True)[: max(1, k // 2)]:
+        for item in sorted(signal_positive, key=lambda x: abs(float(x.get("IC", 0) or 0)), reverse=True)[: max(1, k // 2)]:
             if _add(item):
                 return selected[:k]
 
-    # Add promising but non-passing structures, ranked for low TVR and positive IC.
+    # Add promising but non-passing structures, ranked by raw h60 signal strength.
     exploratory = [
         f for f in all_factors
         if not f.get("PassGates")
-        and float(f.get("IC", 0) or 0) >= min_ic
-        and float(f.get("tvr", 0) or 0) < 400
+        and abs(float(f.get("IC", 0) or 0)) >= min_ic
     ]
-    exploratory.sort(key=lambda x: (x.get("IC", 0), -float(x.get("tvr", 0) or 0)), reverse=True)
+    exploratory.sort(key=lambda x: (abs(float(x.get("IC", 0) or 0)), abs(float(x.get("IR", x.get("ICIR", 0)) or 0))), reverse=True)
     for item in exploratory:
         if _add(item):
             return selected[:k]
@@ -1587,7 +1573,7 @@ def compose_passing_factors_rag(
 
     lines: List[str] = [
         "## Verified Passing Factors (RAG)",
-        "These formulas have ALL passed IC>0.6, IR>2.5, TVR<330 and low-correlation gates on 2022-2023 discovery data.",
+        "These formulas have passed futures tick h60 gates: raw |IC|>0.02, raw |ICIR|>1, low-correlation, and product-level validation.",
         (
             "Semantic matches for the current mechanism hypothesis, plus a couple of global anchors."
             if retrieval_mode == "semantic"
@@ -1623,7 +1609,7 @@ def compose_passing_factors_rag(
         prefix = selection_kind
         if include_formulas:
             line = (
-                f"[{i+1}] {prefix} run_id={run_id} IC={ic:.3f} IR={ir:.2f} TVR={tvr:.0f} Score={score:.0f}"
+                f"[{i+1}] {prefix} run_id={run_id} IC={ic:.4f} ICIR={ir:.2f} TurnoverDiag={tvr:.0f} Score={score:.0f}"
                 + (f" sim={similarity:.3f}" if similarity is not None else "")
                 + "\n"
                 f"    formula: {formula}"
@@ -1633,7 +1619,7 @@ def compose_passing_factors_rag(
             fingerprint = formula_structural_fingerprint(formula)[:120]
             line = (
                 f"[{i+1}] {prefix} run_id={run_id} source={source} motif={formula_motif(formula)} "
-                f"IC={ic:.3f} IR={ir:.2f} TVR={tvr:.0f} Score={score:.0f}"
+                f"IC={ic:.4f} ICIR={ir:.2f} TurnoverDiag={tvr:.0f} Score={score:.0f}"
                 + (f" sim={similarity:.3f}" if similarity is not None else "")
                 + "\n"
                 f"    avoid-skeleton: {fingerprint}"
@@ -1653,12 +1639,12 @@ def compose_passing_factors_rag(
             "  price_core = tanh(safe_div(close-lag_baseline, ts_median(range,20))) OR ts_minmax_norm(close,20) OR ts_pct_change(close,4)",
             "  sigmoid_volume_gate = sigmoid(ts_zscore(safe_div(volume, ts_median(volume,20)), 12-20))",
             "  Often: mean_of(vol_gate, trade_count_gate) for dual confirmation",
-            "CRITICAL: outer_smoother window >= 10 is MANDATORY — window < 10 causes TVR > 500.",
+            "H60 objective: optimize raw tick h60 IC/ICIR and low correlation; turnover is diagnostic only.",
         ]
     else:
         lines += [
             "",
-            "Exploration note: keep the turnover-safe outer smoothing lesson, but choose a different market mechanism and operator skeleton.",
+            "Exploration note: choose a different futures market mechanism and operator skeleton; optimize h60 stability and novelty.",
         ]
     return "\n".join(lines)
 
@@ -1749,18 +1735,16 @@ def compose_failure_pattern_summary(recent_n: int = 60, max_chars: int = 900) ->
         return ""
 
     n = len(non_passing)
-    tvr_fails   = sum(1 for f in non_passing if float(f.get("tvr", 0) or 0) > 330)
-    low_ic      = sum(1 for f in non_passing if abs(float(f.get("IC", 0) or 0)) < 0.3)
+    low_ic      = sum(1 for f in non_passing if abs(float(f.get("IC", 0) or 0)) < 0.02)
     neg_ic      = sum(1 for f in non_passing if float(f.get("IC", 0) or 0) < 0)
     low_ir      = sum(1 for f in non_passing if float(f.get("IR", 0) or 0) < 1.0)
 
     lines = [f"## Recent Failure Analysis (last {n} non-passing factors out of {len(recent)} tested)"]
-    lines.append(f"  TVR > 330: {tvr_fails}/{n} ({100*tvr_fails//max(n,1)}%) — smoother window too short")
-    lines.append(f"  |IC| < 0.3 (no signal): {low_ic}/{n} ({100*low_ic//max(n,1)}%) — wrong mechanism or noisy formula")
+    lines.append(f"  |IC| < 0.02 (no h60 signal): {low_ic}/{n} ({100*low_ic//max(n,1)}%) — wrong mechanism or noisy formula")
     lines.append(f"  IC < 0 (inverted): {neg_ic}/{n} ({100*neg_ic//max(n,1)}%) — missing neg() wrapper or flipped logic")
     lines.append(f"  IR < 1 (unstable): {low_ir}/{n} ({100*low_ir//max(n,1)}%) — signal too noisy across time")
-    lines.append("  Fix priorities: (1) wrap outer layer in ts_decay_linear/ts_ema window>=10, "
-                 "(2) ensure neg() wrapper for reversal, (3) use median/quantile baselines not raw series")
+    lines.append("  Fix priorities: (1) strengthen explicit order-flow/open-interest/VWAP mechanism, "
+                 "(2) ensure sign direction is tested, (3) use median/quantile baselines not raw series")
     text = "\n".join(lines)
     return text[:max_chars]
 

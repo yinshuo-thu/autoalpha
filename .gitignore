@@ -105,6 +105,7 @@ model_lab/
 process_logs/
 knowledge.json
 loop_state.json
+factor_correlations.json
 manual/artifacts/
 manual/reports/
 manual/submit/

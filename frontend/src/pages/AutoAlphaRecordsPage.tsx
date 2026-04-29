@@ -580,20 +580,17 @@ function failedGateKeys(factor: KbFactor) {
     .map(([key]) => key);
 }
 
-const SCREEN_THRESHOLDS = { IC: 0.12, IR: 0.6, TVR: 420 };
+const SCREEN_THRESHOLDS = { IC: 0.02, ICIR: 1.0 };
 
 function screenFailureDetails(factor: KbFactor): ScreenFailDetail[] {
   if (factor.screen_fail_details?.length) return factor.screen_fail_details;
   if (factor.status !== 'screened_out') return [];
   const details: ScreenFailDetail[] = [];
-  if ((factor.IC ?? 0) < SCREEN_THRESHOLDS.IC) {
-    details.push({ key: 'IC', value: factor.IC, threshold: SCREEN_THRESHOLDS.IC, direction: '>=', message: `IC=${formatNumber(factor.IC, 3)}<${SCREEN_THRESHOLDS.IC}` });
+  if (Math.abs(factor.IC ?? 0) < SCREEN_THRESHOLDS.IC) {
+    details.push({ key: 'IC', value: factor.IC, threshold: SCREEN_THRESHOLDS.IC, direction: 'abs >=', message: `|IC|=${formatNumber(Math.abs(factor.IC ?? 0), 4)}<${SCREEN_THRESHOLDS.IC}` });
   }
-  if ((factor.IR ?? 0) < SCREEN_THRESHOLDS.IR) {
-    details.push({ key: 'IR', value: factor.IR, threshold: SCREEN_THRESHOLDS.IR, direction: '>=', message: `IR=${formatNumber(factor.IR, 3)}<${SCREEN_THRESHOLDS.IR}` });
-  }
-  if ((factor.tvr ?? 0) > SCREEN_THRESHOLDS.TVR) {
-    details.push({ key: 'TVR', value: factor.tvr, threshold: SCREEN_THRESHOLDS.TVR, direction: '<=', message: `TVR=${formatNumber(factor.tvr, 0)}>${SCREEN_THRESHOLDS.TVR}` });
+  if (Math.abs(factor.IR ?? 0) < SCREEN_THRESHOLDS.ICIR) {
+    details.push({ key: 'ICIR', value: factor.IR, threshold: SCREEN_THRESHOLDS.ICIR, direction: 'abs >=', message: `|ICIR|=${formatNumber(Math.abs(factor.IR ?? 0), 3)}<${SCREEN_THRESHOLDS.ICIR}` });
   }
   const expectedDays = Number(factor.screening?.days || factor.eval_days || 0);
   const coveredDays = Number(factor.screening?.covered_days || factor.screening?.result_preview?.nd || factor.eval_days || 0);
@@ -606,11 +603,11 @@ function screenFailureDetails(factor: KbFactor): ScreenFailDetail[] {
 
 function screenDetailLabel(detail: ScreenFailDetail) {
   const key = String(detail.key || '').toUpperCase();
-  if (key === 'TVR' || key === 'TURNOVER') return 'TVR 过高';
+  if (key === 'TVR' || key === 'TURNOVER') return 'Turnover 诊断';
   if (key === 'DAYS') return 'Days 未覆盖';
   if (key === 'COVERAGE') return '覆盖不足';
   if (key === 'IC') return 'IC 偏低';
-  if (key === 'IR') return 'IR 偏低';
+  if (key === 'IR' || key === 'ICIR') return 'ICIR 偏低';
   if (key === 'SCORE') return 'Score 为 0';
   return String(detail.key || '未达标');
 }
@@ -632,9 +629,8 @@ function factorFailureReason(factor: KbFactor) {
   const failed = failedGateKeys(factor);
   if (failed.length) return failed.map((key) => key.toUpperCase()).join(' / ');
   if ((factor.Score ?? 0) <= 0 && factor.status === 'ok') {
-    if ((factor.IC ?? 0) <= 0.6) return 'IC 未过';
-    if ((factor.IR ?? 0) <= 2.5) return 'IR 未过';
-    if ((factor.tvr ?? 0) >= 400) return 'TVR 过高';
+    if (Math.abs(factor.IC ?? 0) <= 0.02) return 'IC 未过';
+    if (Math.abs(factor.IR ?? 0) <= 1.0) return 'ICIR 未过';
     return 'Score 为 0';
   }
   return statusText(factor.status);

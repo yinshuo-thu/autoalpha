@@ -382,6 +382,18 @@ def compute_alpha(
 
 def evaluate_alpha(alpha: pd.Series, hub: DataHub, days: list[str]) -> dict[str, Any]:
     """Compute IC / IR / turnover / gates using evaluate_submission_like_wide."""
+    if _futures_mode():
+        from core.futures_alpha import evaluate_tick_h60_alpha
+
+        day_set = {str(d) for d in days}
+        try:
+            mask = pd.to_datetime(alpha.index.get_level_values("date")).strftime("%Y-%m-%d").isin(day_set)
+            alpha = alpha.loc[mask]
+        except Exception:
+            pass
+        tick_metrics = evaluate_tick_h60_alpha(alpha)
+        return {k: v for k, v in tick_metrics.items() if k not in {"daily_ic", "tick_frames"}}
+
     alpha_un = alpha.unstack("security_id")
     resp_base, rest_base = _get_eval_wide_frames(hub, days)
     resp_un = resp_base.reindex_like(alpha_un)

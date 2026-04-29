@@ -29,7 +29,7 @@ The current implementation focuses on:
 - translating hypotheses into a constrained DSL formula language;
 - parsing formulas into ASTs so the system can inspect fields, operators, windows, and structure;
 - rejecting leakage-prone or invalid formulas before expensive evaluation;
-- computing factor files and futures h60 metrics including raw IC/RankIC, raw ICIR, market breadth, OOS stability, and novelty versus existing alpha files; turnover is kept as a diagnostic, not a pass/fail gate;
+- computing factor files and futures tick h60 metrics including raw IC/RankIC, raw ICIR, market breadth, OOS stability, and novelty versus existing alpha files; turnover is kept as a diagnostic, not a pass/fail gate;
 - saving passing and failing attempts into a knowledge base for later retrieval;
 - using RAG and generation experience to steer the next mining rounds;
 - combining mined factors with rank-based ensembles and ML meta-models under chronological train/validation/OOS splits;
@@ -56,7 +56,7 @@ The v3 loop is designed as a research factory rather than a single model call.
    - `formula_validator.py` and `compliance_guard.py` enforce syntax validity, operator whitelists, field whitelists, no `resp` usage, no `trading_restriction` usage in factor construction, and bounded output behavior.
 
 5. **Evaluation and gate checks**
-   - `quick_test.py`, `core/evaluator.py`, and `core/submission.py` compute factor values, apply post-processing, evaluate h60 raw IC/ICIR/concentration, and package passing factors.
+   - `quick_test.py`, `core/evaluator.py`, and `core/futures_alpha.py` compute factor values, broadcast them to the OFR tick `ext` grid, evaluate 15s h60 raw IC/ICIR, compare against existing alpha files, and package passing factors in the same native parquet layout.
    - Factors that pass gates are copied to submit-ready outputs; runtime parquet files remain outside Git.
 
 6. **Memory update**

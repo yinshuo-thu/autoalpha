@@ -9,6 +9,28 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-29T09:39:05+00:00',
+    title: '清理 tick h60 迁移后的旧 TVR 反馈',
+    summary: '系统性检查运行日志和源码后，移除知识库/RAG 与前端记录页里残留的旧 TVR gate 和旧 IC/IR 阈值提示，避免挖掘 prompt 被历史股票/15m 标准带偏。',
+    tags: ['RAG', 'Frontend', 'Futures', 'Evaluation'],
+    bullets: [
+      'knowledge_base 的失败归因改为 low_ic/low_icir，stability_alert 替代 tvr_alert。',
+      'llm_client 不再注入 tvr_alert；前端记录页筛选失败推断改为 |IC|<0.02、|ICIR|<1。',
+      '前端 npm run build 与 Python py_compile 均通过。',
+    ],
+  },
+  {
+    timestamp: '2026-04-29T09:33:48+00:00',
+    title: '切换到 tick h60 期货评估与导出',
+    summary: '修正 h60 标签口径：不再用下一根 15m bar 近似，而是在 OFR tick 网格上广播 15m DSL 信号，并用 timestamp+15s 的 h60 forward return 评估和导出。',
+    tags: ['Futures', 'Evaluation', 'Frontend', 'Runtime'],
+    bullets: [
+      'core/futures_alpha 新增 tick h60 评估、OFR tick 信号广播、native ext 相关性比较和 tick 格式导出。',
+      'quick_test 与 pipeline 在 futures mode 下优先使用 futures_tick_h60_15s 指标。',
+      'Vite allowedHosts 放开，降低 VSCode Remote SSH 端口转发域名被拦截的概率。',
+    ],
+  },
+  {
     timestamp: '2026-04-29T08:59:26+00:00',
     title: 'h60 raw IC/ICIR 与 Paper 检索优化',
     summary: '切换期货评价为 h60 15m forward-return 原始 IC/ICIR，移除 TVR 通过门槛，并按论文流水线要求增强 arXiv q-fin 检索、meta.json 落盘和 embedding 配置测试。',

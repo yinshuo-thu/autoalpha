@@ -1238,9 +1238,9 @@ def generate_idea(
     if failed_examples:
         sections.append(("failed_examples", failed_examples))
 
-    tvr_alert = guidance.get("tvr_alert") or ""
-    if tvr_alert:
-        sections.append(("tvr_alert", f"⚠️ {tvr_alert}"))
+    stability_alert = guidance.get("stability_alert") or ""
+    if stability_alert:
+        sections.append(("stability_alert", stability_alert))
 
     generation_experience = guidance.get("generation_experience_context") or ""
     if generation_experience:

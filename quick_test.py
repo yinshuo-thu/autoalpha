@@ -349,9 +349,28 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothe
 
         from core.futures_alpha import (
             compute_existing_alpha_correlations,
+            evaluate_tick_h60_alpha,
             export_future_alpha_format,
             futures_research_score,
         )
+        tick_h60 = evaluate_tick_h60_alpha(alpha)
+        result["tick_h60_metrics"] = {k: v for k, v in tick_h60.items() if k not in {"daily_ic", "tick_frames"}}
+        result["IC"] = tick_h60.get("IC", result.get("IC", 0))
+        result["IR"] = tick_h60.get("IR", result.get("IR", 0))
+        result["ICIR"] = tick_h60.get("ICIR", result.get("ICIR", 0))
+        result["daily_ic_std"] = tick_h60.get("daily_ic_std", result.get("daily_ic_std", 0))
+        result["Score"] = tick_h60.get("Score", result.get("Score", 0))
+        result["score_raw"] = result["Score"]
+        result["PassGates"] = bool(tick_h60.get("PassGates", result.get("PassGates", False)))
+        result["gates_detail"] = tick_h60.get("GatesDetail", result.get("gates_detail", {}))
+        result["market_metrics"] = tick_h60.get("market_metrics", result.get("market_metrics", {}))
+        result["metric_mode"] = tick_h60.get("metric_mode", "futures_tick_h60_15s")
+        if not tick_h60.get("daily_ic", pd.Series(dtype=float)).empty:
+            result["time_series"]["daily_ic"] = [
+                {"date": str(d), "IC": float(v)}
+                for d, v in tick_h60["daily_ic"].items()
+                if np.isfinite(v)
+            ]
         corr_report = compute_existing_alpha_correlations(
             alpha,
             factor_name,
@@ -385,7 +404,7 @@ def quick_test(formula_text, factor_name='quick_test', postprocess=None, hypothe
             result['reason'] = 'Quality gates passed, but submission profile still needs fixing'
         elif (
             result.get("futures_score", 0.0) >= 20.0
-            or len([m for m in (result.get("market_metrics") or {}).values() if m.get("effective")]) >= 2
+            and len([m for m in (result.get("market_metrics") or {}).values() if m.get("effective")]) >= 1
         ) and corr_report.get("max_abs_corr", 1.0) < 0.75:
             result['classification'] = 'Futures Research Candidate'
             result['reason'] = 'Futures score and novelty thresholds passed; requires longer OOS confirmation'

@@ -250,10 +250,9 @@ def precompute_future_resp_cache(start=None, end=None, force=False):
     if os.path.exists(cache_path) and not force:
         return pd.read_parquet(cache_path)
     bars = precompute_future_15m_cache(start, end, force=False)
-    # h60 at 15-second frequency corresponds to a 15-minute forward return.
-    # Since factors are evaluated on 15-minute bars, use the next 15-minute bar
-    # close per contract as the local h60 label instead of broadcasting a daily
-    # next-close return across all intraday bars.
+    # Bar-level fallback label. The primary futures evaluator now uses the OFR
+    # tick grid in core.futures_alpha and computes h60 as timestamp+15 seconds.
+    # This 15m label remains only for non-tick diagnostics and older UI paths.
     close_wide = bars["close_trade_px"].unstack("security_id").sort_index()
     forward_ret = close_wide.shift(-1).div(close_wide).sub(1.0)
     same_session_next_bar = (
