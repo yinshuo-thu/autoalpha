@@ -246,19 +246,28 @@ def precompute_future_15m_cache(start=None, end=None, force=False):
 def precompute_future_resp_cache(start=None, end=None, force=False):
     start, end = _future_default_start_end(start, end)
     products = ",".join(_future_products() or ["ALL"]).replace(",", "_")
-    cache_path = os.path.join(CACHE_DIR, f"future_resp_{products}_{start}_{end}.parquet")
+    cache_path = os.path.join(CACHE_DIR, f"future_resp_h60_15m_{products}_{start}_{end}.parquet")
     if os.path.exists(cache_path) and not force:
         return pd.read_parquet(cache_path)
     bars = precompute_future_15m_cache(start, end, force=False)
-    daily = (
-        bars["close_trade_px"]
-        .groupby(["date", "security_id"], sort=True)
-        .last()
-        .unstack("security_id")
-        .sort_index()
+    # h60 at 15-second frequency corresponds to a 15-minute forward return.
+    # Since factors are evaluated on 15-minute bars, use the next 15-minute bar
+    # close per contract as the local h60 label instead of broadcasting a daily
+    # next-close return across all intraday bars.
+    close_wide = bars["close_trade_px"].unstack("security_id").sort_index()
+    forward_ret = close_wide.shift(-1).div(close_wide).sub(1.0)
+    same_session_next_bar = (
+        pd.to_datetime(close_wide.index.get_level_values("date")).to_series(index=close_wide.index).shift(-1)
+        == pd.to_datetime(close_wide.index.get_level_values("date")).to_series(index=close_wide.index)
     )
-    resp = daily.shift(-1).div(daily).sub(1.0).stack().rename("resp").to_frame()
-    resp.index = resp.index.set_names(["date", "security_id"])
+    same_session_mask = pd.DataFrame(
+        np.repeat(same_session_next_bar.to_numpy()[:, None], len(close_wide.columns), axis=1),
+        index=close_wide.index,
+        columns=close_wide.columns,
+    )
+    forward_ret = forward_ret.where(same_session_mask)
+    resp = forward_ret.stack(dropna=True).rename("resp").to_frame()
+    resp.index = resp.index.set_names(["date", "datetime", "security_id"])
     resp.to_parquet(cache_path, engine="pyarrow")
     return resp
 
@@ -266,7 +275,7 @@ def precompute_future_resp_cache(start=None, end=None, force=False):
 def precompute_future_tr_cache(start=None, end=None, force=False):
     start, end = _future_default_start_end(start, end)
     products = ",".join(_future_products() or ["ALL"]).replace(",", "_")
-    cache_path = os.path.join(CACHE_DIR, f"future_tr_{products}_{start}_{end}.parquet")
+    cache_path = os.path.join(CACHE_DIR, f"future_tr_h60_15m_{products}_{start}_{end}.parquet")
     if os.path.exists(cache_path) and not force:
         return pd.read_parquet(cache_path)
     resp = precompute_future_resp_cache(start, end, force=False)

@@ -108,6 +108,7 @@ loop_state.json
 manual/artifacts/
 manual/reports/
 manual/submit/
+papers/
 outputs/*.json
 outputs/research_runs/
 generation_notes/

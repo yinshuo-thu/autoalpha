@@ -120,7 +120,7 @@ Hard constraints:
 - Outer smoother must be >= 10 bars, e.g. ts_mean(x,10), ts_ema(x,10), ts_decay_linear(x,15).
 
 Research goal:
-- Favor stable, low-turnover, full-coverage factors that can pass IC>0.6, IR>2.5, TVR<330.
+- Favor stable, full-coverage futures factors that can pass raw |IC|>0.02 and raw |ICIR|>1 on h60 (15s/15m-bar) labels.
 - v3 discovery is train-only on 2022-2023; 2024 is OOS report-only and must not be optimized from feedback.
 - Low redundancy is a hard objective: target max absolute correlation <= 0.72 versus accepted v3 factors.
 - Good motifs: VWAP reversion, range-location persistence, failed breakout, volume-confirmed continuation,
@@ -341,11 +341,8 @@ Infix      : +, -, *, /
   open-interest pressure, main/nearby contract participation, price-vs-vwap reversion,
   range-location persistence, failed breakout, volume-confirmed continuation, or liquidity stress.
 - Prefer a structure like signal core + stabilizer + cross-sectional normalization.
-- TURNOVER IS THE #1 KILLER: outer smoother window MUST be >= 10 bars.
-  ts_decay_linear(x, 2) or ts_decay_linear(x, 3) produces TVR > 700 — FATAL, will not pass.
-  The outermost layer MUST be ts_mean(x, 10), ts_decay_linear(x, 15), or ts_ema(x, 10) or longer.
-  Never use delta(close,1), ts_pct_change(close,1), or sign(delta(x,1)) directly as the core
-  signal without >= 10-bar outer smoothing. Short-window signals MUST be pre-smoothed before rank.
+- Prefer stable h60 behavior: avoid pure one-bar noise unless it is anchored by order-flow, VWAP,
+  open-interest, liquidity or range-state context and a reasonable outer smoother.
 - New useful patterns: robust baselines via ts_median/ts_quantile, soft clipping via tanh/sigmoid,
   liquidity-neutral residuals via cs_neutralize, and multi-leg blends via mean_of/combine_rank.
 - Aim for diversity versus prior factors. Do not paraphrase existing formulas.
@@ -356,8 +353,8 @@ Infix      : +, -, *, /
 
 # FUTURES RESEARCH GATES
 RankIC/IC must be stable by product, at least one market should be effective, max existing-alpha
-correlation should stay below novelty thresholds, and OOS bars must not collapse. Turnover remains
-important, but novelty and cross-product robustness replace the legacy Score as the main ranker.
+correlation should stay below novelty thresholds, and OOS bars must not collapse. The main ranker
+uses raw h60 IC/ICIR and novelty; turnover is diagnostic only, not a pass/fail standard.
 
 # OUTPUT
 Return ONLY raw JSON:
@@ -798,7 +795,7 @@ def summarize_generation_experience(payload: dict[str, Any], previous_context: s
         "必须覆盖：\n"
         "1. 本代总体表现：测试数、通过数、best score、主要失败模式。\n"
         "2. 可复用的正向经验：哪些市场机制、字段组合、平滑/归一化方式值得继续。\n"
-        "3. 明确的负向经验：例如 TVR 过高、IR 不稳、IC 方向差、重复结构、DSL 语法问题分别如何避免。\n"
+        "3. 明确的负向经验：例如 ICIR 不稳、IC 方向差、h60 标签失效、重复结构、DSL 语法问题分别如何避免。\n"
         "4. 下一代探索启示：给出 5-8 条具体可执行的生成约束或方向。\n"
         "5. 写给下一代 Prompt 的短指令：控制在 120 中文字内。\n\n"
         "输出 Markdown，使用清晰小标题。不要编造不存在的通过因子；如果没有通过因子，要直说。"
@@ -819,9 +816,9 @@ def summarize_generation_experience(payload: dict[str, Any], previous_context: s
             f"- Best Score: {float(payload.get('best_score', 0) or 0):.2f}\n"
             f"- Failure Pattern: {failure_text}\n\n"
             "## 后续启示\n"
-            "- 优先降低换手：增加 `ts_decay_linear` / `ts_mean` 平滑，避免直接追逐 1-3 bar 的成交量尖峰。\n"
+            "- 优先提升 h60 原始 IC/ICIR：增加合理平滑和状态过滤，避免直接追逐无机制的一跳成交量尖峰。\n"
             "- 避免重复近期失败的 operator skeleton，尝试更稳健的 median/quantile baseline。\n"
-            "- 继续保持公式紧凑，先解决 IC/IR/TVR 的门槛，再扩展复杂结构。\n\n"
+            "- 继续保持公式紧凑，先解决 raw IC/raw ICIR 和低相关门槛，再扩展复杂结构。\n\n"
             f"_LLM summary fallback because: {exc}_"
         )
 

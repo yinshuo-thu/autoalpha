@@ -36,7 +36,16 @@ def calc_ir(daily_ic):
     m = daily_ic.mean()
     s = daily_ic.std()
     if pd.isna(s) or s == 0: return 0.0
-    return (m / s) * np.sqrt(252)
+    return m / s
+
+def calc_h60_score(daily_ic):
+    if daily_ic is None or daily_ic.empty:
+        return 0.0, 0.0, 0.0, 0.0
+    mean_ic = float(daily_ic.mean()) if pd.notnull(daily_ic.mean()) else 0.0
+    std_ic = float(daily_ic.std()) if pd.notnull(daily_ic.std()) else 0.0
+    icir = mean_ic / std_ic if std_ic > 0 else 0.0
+    score = abs(mean_ic) * np.sqrt(min(abs(icir), 6.0)) * 100.0 * 100.0
+    return mean_ic, std_ic, icir, score
 
 def calc_turnover(alpha):
     unstacked = alpha.unstack('security_id')
@@ -104,8 +113,8 @@ def calc_monthly_ir(daily_ic):
     for (y, m), grp in daily_ic.groupby([idx.year, idx.month]):
         m_ic = grp.mean()
         m_std = grp.std()
-        ir = (m_ic / m_std * np.sqrt(252)) if (pd.notnull(m_std) and m_std > 0) else 0.0
-        result[f"{y}-{m:02d}"] = {'IC': float(m_ic * 100) if pd.notnull(m_ic) else 0,
+        ir = (m_ic / m_std) if (pd.notnull(m_std) and m_std > 0) else 0.0
+        result[f"{y}-{m:02d}"] = {'IC': float(m_ic) if pd.notnull(m_ic) else 0,
                                    'IR': float(ir) if pd.notnull(ir) else 0}
     return result
 
@@ -222,29 +231,24 @@ def evaluate_official(alpha, resp, restriction):
     bar_ic = calc_bar_ic_wide(alpha_tr_un, resp_un)
     daily_ic = calc_daily_ic(bar_ic)
     
-    ic_raw = daily_ic.mean()
-    ic_bps = ic_raw * 100
-    ir = calc_ir(daily_ic)
+    ic_raw, daily_ic_std, ir, score = calc_h60_score(daily_ic)
     
     daily_tvr = calc_turnover_wide(alpha_un)
     tvr = daily_tvr.mean()
     
     maxx, minn, max_d, min_d = calc_book_stats_wide(alpha_un)
     
-    gate_ic = ic_raw > 0.006
-    gate_ir = ir > 2.5
-    gate_tvr = tvr < 400
+    gate_ic = abs(ic_raw) > 0.02
+    gate_ir = abs(ir) > 1.0
     gate_conc = (maxx < 50) and (abs(minn) < 50) and (max_d < 20) and (abs(min_d) < 20)
     
-    pass_gates = gate_ic and gate_ir and gate_tvr and gate_conc
-    
-    score = 0
-    if pass_gates:
-        score = max(0, (ic_raw - 0.0005 * tvr)) * np.sqrt(ir) * 100
+    pass_gates = gate_ic and gate_ir and gate_conc
         
     return {
-        'IC': float(ic_bps) if pd.notnull(ic_bps) else 0,
+        'IC': float(ic_raw) if pd.notnull(ic_raw) else 0,
         'IR': float(ir) if pd.notnull(ir) else 0,
+        'ICIR': float(ir) if pd.notnull(ir) else 0,
+        'daily_ic_std': float(daily_ic_std) if pd.notnull(daily_ic_std) else 0,
         'Turnover': float(tvr) if pd.notnull(tvr) else 0,
         'maxx': float(maxx) if pd.notnull(maxx) else 0,
         'minn': float(minn) if pd.notnull(minn) else 0,
@@ -258,7 +262,7 @@ def evaluate_official(alpha, resp, restriction):
             'resp_un': resp_un
         },
         'GatesDetail': {
-            'IC': bool(gate_ic), 'IR': bool(gate_ir), 'Turnover': bool(gate_tvr), 'Concentration': bool(gate_conc)
+            'IC': bool(gate_ic), 'ICIR': bool(gate_ir), 'Concentration': bool(gate_conc)
         }
     }
 
@@ -272,8 +276,7 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
     bar_ic = calc_bar_ic_wide(alpha_tr_un, resp_sub)
     daily_ic = calc_daily_ic(bar_ic)
 
-    ic_display = daily_ic.mean() * 100 if not daily_ic.empty else 0.0
-    ir = calc_ir(daily_ic)
+    ic_display, daily_ic_std, ir, score = calc_h60_score(daily_ic)
 
     daily_tvr, weights = calc_turnover_submission_wide(alpha_tr_un)
     tvr_raw = daily_tvr.mean() if not daily_tvr.empty else 0.0
@@ -285,19 +288,16 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
     maxx, minn, max_d, min_d = calc_book_stats_wide(alpha_tr_un)
     pos_stats = calc_submission_position_stats_wide(weights)
 
-    gate_ic = ic_display > 0.6
-    gate_ir = ir > 2.5
-    gate_tvr = cloud_tvr < 400
+    gate_ic = abs(ic_display) > 0.02
+    gate_ir = abs(ir) > 1.0
     gate_conc = (maxx < 50) and (abs(minn) < 50) and (max_d < 20) and (abs(min_d) < 20)
-    pass_gates = gate_ic and gate_ir and gate_tvr and gate_conc
-
-    score = 0.0
-    if pass_gates:
-        score = max(0.0, ic_display - 0.0005 * cloud_tvr) * np.sqrt(ir) * 100
+    pass_gates = gate_ic and gate_ir and gate_conc
 
     result_preview = {
         'IC': float(ic_display) if pd.notnull(ic_display) else 0.0,
         'IR': float(ir) if pd.notnull(ir) else 0.0,
+        'ICIR': float(ir) if pd.notnull(ir) else 0.0,
+        'daily_ic_std': float(daily_ic_std) if pd.notnull(daily_ic_std) else 0.0,
         'tvr': float(cloud_tvr) if pd.notnull(cloud_tvr) else 0.0,
         'local_tvr': float(tvr) if pd.notnull(tvr) else 0.0,
         'raw_tvr': float(tvr_raw) if pd.notnull(tvr_raw) else 0.0,
@@ -317,6 +317,8 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
     return {
         'IC': float(ic_display) if pd.notnull(ic_display) else 0.0,
         'IR': float(ir) if pd.notnull(ir) else 0.0,
+        'ICIR': float(ir) if pd.notnull(ir) else 0.0,
+        'daily_ic_std': float(daily_ic_std) if pd.notnull(daily_ic_std) else 0.0,
         'Turnover': float(cloud_tvr) if pd.notnull(cloud_tvr) else 0.0,
         'TurnoverLocal': float(tvr) if pd.notnull(tvr) else 0.0,
         'Score': float(score),
@@ -325,14 +327,13 @@ def evaluate_submission_like_wide(alpha_un, resp_un, restriction_un):
         'minn': float(minn) if pd.notnull(minn) else 0.0,
         'max_mean': float(max_d) if pd.notnull(max_d) else 0.0,
         'min_mean': float(min_d) if pd.notnull(min_d) else 0.0,
-        'score_formula': 'score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100',
-        'metric_mode': 'submission_cloud_aligned',
+        'score_formula': 'score = abs(total_IC) * sqrt(min(abs(mean_daily_ic / daily_ic_std), 6)) * 100 * 100',
+        'metric_mode': 'futures_h60_15s_raw_ic',
         'turnover_basis': 'restricted_raw_alpha_diff_sum_x100',
         'cloud_tvr_multiplier': float(cloud_tvr_multiplier),
         'GatesDetail': {
             'IC': bool(gate_ic),
-            'IR': bool(gate_ir),
-            'Turnover': bool(gate_tvr),
+            'ICIR': bool(gate_ir),
             'Concentration': bool(gate_conc),
         },
         'result_preview': result_preview,
@@ -350,7 +351,7 @@ def evaluate_research(metrics_official):
     
     bar_rank_ic = calc_rank_ic_wide(alpha_tr_un, resp_un)
     daily_rank_ic = calc_daily_ic(bar_rank_ic)
-    rank_ic = daily_rank_ic.mean() * 100 if not daily_rank_ic.empty else 0.0
+    rank_ic = daily_rank_ic.mean() if not daily_rank_ic.empty else 0.0
     
     monthly_ic = calc_monthly_ic(daily_ic)
     monthly_ir_data = calc_monthly_ir(daily_ic)
@@ -365,7 +366,7 @@ def evaluate_research(metrics_official):
     
     yearly = {}
     for y in sorted(df_ic['year'].unique()):
-        y_ic = df_ic[df_ic['year'] == y]['IC'].mean() * 100
+        y_ic = df_ic[df_ic['year'] == y]['IC'].mean()
         y_ir = calc_ir(df_ic[df_ic['year'] == y]['IC'])
         y_tvr = df_tvr[df_tvr['year'] == y]['tvr'].mean()
         yearly[str(y)] = {
@@ -374,9 +375,8 @@ def evaluate_research(metrics_official):
             'Turnover': float(y_tvr) if pd.notnull(y_tvr) else 0
         }
     
-    ic_bps = metrics_official.get('IC', 0)
     tvr_val = metrics_official.get('Turnover', 0)
-    ic_minus_tvr = (ic_bps / 100.0) - 0.0005 * tvr_val
+    ic_minus_tvr = metrics_official.get('IC', 0)
         
     return {
         'overall': metrics_official,

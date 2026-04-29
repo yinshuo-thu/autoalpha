@@ -9,6 +9,18 @@ export interface DevTimelineEntry {
 // 后续每次”修改并跑通”后，在这里追加一条记录即可；页面会按 timestamp 自动排序。
 export const devTimeline: DevTimelineEntry[] = [
   {
+    timestamp: '2026-04-29T08:59:26+00:00',
+    title: 'h60 raw IC/ICIR 与 Paper 检索优化',
+    summary: '切换期货评价为 h60 15m forward-return 原始 IC/ICIR，移除 TVR 通过门槛，并按论文流水线要求增强 arXiv q-fin 检索、meta.json 落盘和 embedding 配置测试。',
+    tags: ['Futures', 'Evaluation', 'Paper', 'API'],
+    bullets: [
+      'Embedding API 使用 text-embedding-v4 测试返回 200，项目内 embedding 封装返回 1024 维向量。',
+      'prepare_data 生成 future_resp_h60_15m 缓存，quick_test/evaluator 使用 raw IC、raw ICIR 和新 score 公式。',
+      'Paper fetcher 增加 q-fin 分类、期货强相关检索词、arXiv 3 秒节流、papers/<arxiv-id>/meta.json 元数据落盘。',
+      'TVR/Turnover 保留为诊断展示，不再作为 screen/promote/confirm/full gate 标准。',
+    ],
+  },
+  {
     timestamp: '2026-04-29T07:43:11+00:00',
     title: '忽略本地 loop 运行状态文件',
     summary: '将 knowledge.json 与 loop_state.json 作为本地挖掘运行状态加入 .gitignore，避免后台挖掘产生的运行文件污染源码分支。',

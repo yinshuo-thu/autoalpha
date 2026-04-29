@@ -675,21 +675,17 @@ def _screen_failure_details(
 ) -> list[dict[str, Any]]:
     """Return structured details explaining exactly which screen gates failed."""
     ic = float(metrics.get("IC", 0) or 0)
-    ir = float(metrics.get("IR", 0) or 0)
-    tvr = float(metrics.get("Turnover", 0) or 0)
+    ir = float(metrics.get("ICIR", metrics.get("IR", 0)) or 0)
     preview = metrics.get("result_preview") or {}
     nd = float(preview.get("nd", metrics.get("nd", 0)) or 0)
     cover_all = preview.get("cover_all", metrics.get("cover_all"))
-    min_ic = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12)
-    min_ir = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 0.6)
-    max_tvr = _cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0)
+    min_ic = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.02)
+    min_ir = _cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 1.0)
     fails: list[dict[str, Any]] = []
-    if ic < min_ic:
-        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": ">=", "message": f"IC={ic:.3f}<{min_ic}"})
-    if ir < min_ir:
-        fails.append({"key": "IR", "value": ir, "threshold": min_ir, "direction": ">=", "message": f"IR={ir:.3f}<{min_ir}"})
-    if tvr > max_tvr:
-        fails.append({"key": "TVR", "value": tvr, "threshold": max_tvr, "direction": "<=", "message": f"TVR={tvr:.0f}>{max_tvr:.0f}"})
+    if abs(ic) < min_ic:
+        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": "abs >=", "message": f"|IC|={abs(ic):.4f}<{min_ic}"})
+    if abs(ir) < min_ir:
+        fails.append({"key": "ICIR", "value": ir, "threshold": min_ir, "direction": "abs >=", "message": f"|ICIR|={abs(ir):.3f}<{min_ir}"})
     if expected_days and nd and nd < expected_days:
         fails.append({"key": "Days", "value": nd, "threshold": expected_days, "direction": ">=", "message": f"Days={nd:.0f}/{expected_days}"})
     if cover_all is not None and int(bool(cover_all)) == 0:
@@ -716,32 +712,24 @@ def _screen_promotion_failure_details(
 ) -> list[dict[str, Any]]:
     """Return details for the stricter full-eval promotion gate."""
     ic = float(metrics.get("IC", 0) or 0)
-    ir = float(metrics.get("IR", 0) or 0)
-    tvr = float(metrics.get("Turnover", 0) or 0)
+    ir = float(metrics.get("ICIR", metrics.get("IR", 0)) or 0)
     preview = metrics.get("result_preview") or {}
     nd = float(preview.get("nd", metrics.get("nd", 0)) or 0)
     min_ic = _cfg_float(
         cfg,
         "AUTOALPHA_SCREEN_PROMOTE_MIN_IC",
-        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12), 0.45),
+        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.02), 0.02),
     )
     min_ir = _cfg_float(
         cfg,
         "AUTOALPHA_SCREEN_PROMOTE_MIN_IR",
-        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 0.6), 2.0),
-    )
-    max_tvr = _cfg_float(
-        cfg,
-        "AUTOALPHA_SCREEN_PROMOTE_MAX_TVR",
-        min(_cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0), 360.0),
+        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 1.0), 1.0),
     )
     fails: list[dict[str, Any]] = []
-    if ic < min_ic:
-        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": ">=", "message": f"promote IC={ic:.3f}<{min_ic}"})
-    if ir < min_ir:
-        fails.append({"key": "IR", "value": ir, "threshold": min_ir, "direction": ">=", "message": f"promote IR={ir:.3f}<{min_ir}"})
-    if tvr > max_tvr:
-        fails.append({"key": "TVR", "value": tvr, "threshold": max_tvr, "direction": "<=", "message": f"promote TVR={tvr:.0f}>{max_tvr:.0f}"})
+    if abs(ic) < min_ic:
+        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": "abs >=", "message": f"promote |IC|={abs(ic):.4f}<{min_ic}"})
+    if abs(ir) < min_ir:
+        fails.append({"key": "ICIR", "value": ir, "threshold": min_ir, "direction": "abs >=", "message": f"promote |ICIR|={abs(ir):.3f}<{min_ir}"})
     if expected_days and nd and nd < expected_days:
         fails.append({"key": "Days", "value": nd, "threshold": expected_days, "direction": ">=", "message": f"Days={nd:.0f}/{expected_days}"})
     if not fails and not (bool(metrics.get("PassGates")) or float(metrics.get("Score", 0) or 0) > 0):
@@ -760,41 +748,31 @@ def _screen_promotion_failure_reason(
 
 def _should_promote_from_screen(metrics: dict[str, Any], cfg: dict[str, str]) -> bool:
     ic = float(metrics.get("IC", 0) or 0)
-    ir = float(metrics.get("IR", 0) or 0)
+    ir = float(metrics.get("ICIR", metrics.get("IR", 0)) or 0)
     score = float(metrics.get("Score", 0) or 0)
-    tvr = float(metrics.get("Turnover", 0) or 0)
     min_ic = _cfg_float(
         cfg,
         "AUTOALPHA_SCREEN_PROMOTE_MIN_IC",
-        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12), 0.45),
+        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.02), 0.02),
     )
     min_ir = _cfg_float(
         cfg,
         "AUTOALPHA_SCREEN_PROMOTE_MIN_IR",
-        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 0.6), 2.0),
+        max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IR", 1.0), 1.0),
     )
-    max_tvr = _cfg_float(
-        cfg,
-        "AUTOALPHA_SCREEN_PROMOTE_MAX_TVR",
-        min(_cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0), 360.0),
-    )
-    return bool(metrics.get("PassGates")) or score > 0 or (ic >= min_ic and ir >= min_ir and tvr <= max_tvr)
+    return bool(metrics.get("PassGates")) or score > 0 or (abs(ic) >= min_ic and abs(ir) >= min_ir)
 
 
 def _confirmation_failure_details(metrics: dict[str, Any], cfg: dict[str, str]) -> list[dict[str, Any]]:
     ic = float(metrics.get("IC", 0) or 0)
-    ir = float(metrics.get("IR", 0) or 0)
-    tvr = float(metrics.get("Turnover", 0) or 0)
-    min_ic = _cfg_float(cfg, "AUTOALPHA_CONFIRM_MIN_IC", 0.25)
-    min_ir = _cfg_float(cfg, "AUTOALPHA_CONFIRM_MIN_IR", 1.2)
-    max_tvr = _cfg_float(cfg, "AUTOALPHA_CONFIRM_MAX_TVR", 380.0)
+    ir = float(metrics.get("ICIR", metrics.get("IR", 0)) or 0)
+    min_ic = _cfg_float(cfg, "AUTOALPHA_CONFIRM_MIN_IC", 0.02)
+    min_ir = _cfg_float(cfg, "AUTOALPHA_CONFIRM_MIN_IR", 1.0)
     fails: list[dict[str, Any]] = []
-    if ic < min_ic:
-        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": ">=", "message": f"confirm IC={ic:.3f}<{min_ic}"})
-    if ir < min_ir:
-        fails.append({"key": "IR", "value": ir, "threshold": min_ir, "direction": ">=", "message": f"confirm IR={ir:.3f}<{min_ir}"})
-    if tvr > max_tvr:
-        fails.append({"key": "TVR", "value": tvr, "threshold": max_tvr, "direction": "<=", "message": f"confirm TVR={tvr:.0f}>{max_tvr:.0f}"})
+    if abs(ic) < min_ic:
+        fails.append({"key": "IC", "value": ic, "threshold": min_ic, "direction": "abs >=", "message": f"confirm |IC|={abs(ic):.4f}<{min_ic}"})
+    if abs(ir) < min_ir:
+        fails.append({"key": "ICIR", "value": ir, "threshold": min_ir, "direction": "abs >=", "message": f"confirm |ICIR|={abs(ir):.3f}<{min_ir}"})
     return fails
 
 
@@ -827,9 +805,9 @@ def _should_materialize_artifacts(metrics: dict[str, Any], cfg: dict[str, str]) 
     ic = float(metrics.get("IC", 0) or 0)
     ir = float(metrics.get("IR", 0) or 0)
     score = float(metrics.get("Score", 0) or 0)
-    min_ic = _cfg_float(cfg, "AUTOALPHA_RESEARCH_MIN_IC", 0.3)
-    min_ir = _cfg_float(cfg, "AUTOALPHA_RESEARCH_MIN_IR", 1.2)
-    return bool(metrics.get("PassGates")) or score > 0 or (ic >= min_ic and ir >= min_ir)
+    min_ic = _cfg_float(cfg, "AUTOALPHA_RESEARCH_MIN_IC", 0.02)
+    min_ir = _cfg_float(cfg, "AUTOALPHA_RESEARCH_MIN_IR", 1.0)
+    return bool(metrics.get("PassGates")) or score > 0 or (abs(ic) >= min_ic and abs(ir) >= min_ir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1318,20 +1296,15 @@ def run(
         tvr_opt_combo: str = ""   # name of winning TVR optimization combo, used in step 3d
         if not _should_promote_from_screen(screen_metrics, cfg):
             # 3c-opt. TVR rescue: if IC is promising but TVR is too high, try smoothing combos
-            max_tvr = _cfg_float(
-                cfg,
-                "AUTOALPHA_SCREEN_PROMOTE_MAX_TVR",
-                min(_cfg_float(cfg, "AUTOALPHA_SCREEN_MAX_TVR", 420.0), 360.0),
-            )
             min_ic = _cfg_float(
                 cfg,
                 "AUTOALPHA_SCREEN_PROMOTE_MIN_IC",
-                max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.12), 0.45),
+                max(_cfg_float(cfg, "AUTOALPHA_SCREEN_MIN_IC", 0.02), 0.02),
             )
             stvr = float(screen_metrics.get("Turnover", 0) or 0)
             sic  = float(screen_metrics.get("IC", 0) or 0)
             tvr_rescued = False
-            if stvr > max_tvr and sic >= min_ic:
+            if (not _futures_mode()) and stvr > _cfg_float(cfg, "AUTOALPHA_SCREEN_PROMOTE_MAX_TVR", 360.0) and sic >= min_ic:
                 print(f"  [tvr-opt] TVR={stvr:.0f} too high but IC={sic:.3f} promising — trying smoothing combos")
                 try:
                     from autoalpha_v3.tvr_optimizer import try_reduce_tvr
@@ -1340,7 +1313,7 @@ def run(
                         hub=hub,
                         screen_days=screen_days,
                         evaluate_fn=evaluate_alpha,
-                        max_tvr=max_tvr,
+                        max_tvr=_cfg_float(cfg, "AUTOALPHA_SCREEN_PROMOTE_MAX_TVR", 360.0),
                         min_ic=min_ic,
                     )
                     if opt_alpha is not None and opt_metrics is not None:

@@ -134,16 +134,21 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
     resp = data_hub.resp
     restriction = data_hub.trading_restriction
 
-    # Broadcast daily resp to 15m alpha
     a_df = alpha_series.to_frame("alpha").reset_index()
-    r_df = resp.reset_index()[["date", "security_id", "resp"]]
-    merged = pd.merge(a_df, r_df, on=["date", "security_id"], how="inner")
+    r_df = resp.reset_index()
+    if "datetime" in r_df.columns:
+        r_df = r_df[["date", "datetime", "security_id", "resp"]]
+        merged = pd.merge(a_df, r_df, on=["date", "datetime", "security_id"], how="inner")
+    else:
+        r_df = r_df[["date", "security_id", "resp"]]
+        merged = pd.merge(a_df, r_df, on=["date", "security_id"], how="inner")
     if merged.empty: return {"error": "No overlap"}
     merged = merged.set_index(["date", "datetime", "security_id"]).sort_index()
     alpha_aligned, resp_aligned = merged["alpha"], merged["resp"]
     if restriction is not None and not restriction.empty:
         rest_df = restriction.reset_index()
-        m_rest = pd.merge(merged.reset_index(), rest_df, on=["date", "security_id"], how="left")
+        rest_keys = ["date", "datetime", "security_id"] if "datetime" in rest_df.columns else ["date", "security_id"]
+        m_rest = pd.merge(merged.reset_index(), rest_df, on=rest_keys, how="left")
         restriction_aligned = m_rest.set_index(["date", "datetime", "security_id"]).sort_index().get("trading_restriction", 0).fillna(0)
     else: restriction_aligned = pd.Series(0.0, index=merged.index)
 
@@ -179,14 +184,16 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
 
     return {
         'factor_name': factor_name,
-        'IC': cloud.get('IC', 0) / 100.0,
-        'rank_ic': metrics.get('rank_ic', 0) / 100.0,
+        'IC': cloud.get('IC', 0),
+        'rank_ic': metrics.get('rank_ic', 0),
         'IR': cloud.get('IR', overall.get('IR', 0)),
+        'ICIR': cloud.get('ICIR', overall.get('ICIR', cloud.get('IR', overall.get('IR', 0)))),
+        'daily_ic_std': cloud.get('daily_ic_std', overall.get('daily_ic_std', 0)),
         'Turnover': cloud.get('Turnover', overall.get('Turnover', 0)),
         'TurnoverLocal': cloud.get('TurnoverLocal', overall.get('Turnover', 0)),
         'Score': cloud.get('Score', overall.get('Score', 0)),
         'score_raw': cloud.get('Score', overall.get('Score', 0)),
-        'ic_minus_tvr': ((cloud.get('IC', 0) - 0.0005 * cloud.get('Turnover', 0)) / 100.0),
+        'ic_minus_tvr': cloud.get('IC', 0),
         'cover_all': 1 if missing_days == 0 else 0,
         'missing_days': missing_days,
         'maxx': cloud.get('maxx', overall.get('maxx', 0)),
@@ -201,9 +208,11 @@ def evaluate_factor(alpha_series, data_hub, factor_name='test'):
         'time_series': {
             'daily_ic': daily_ic_list,
         },
-        'score_formula': 'score = (IC - 0.0005 * Turnover) * sqrt(IR) * 100',
+        'score_formula': 'score = abs(total_IC) * sqrt(min(abs(mean_daily_ic / daily_ic_std), 6)) * 100 * 100',
         'score_components': {
-            'IC': cloud.get('IC', 0) / 100.0,
+            'IC': cloud.get('IC', 0),
+            'ICIR': cloud.get('ICIR', cloud.get('IR', 0)),
+            'daily_ic_std': cloud.get('daily_ic_std', 0),
             'Turnover': cloud.get('Turnover', overall.get('Turnover', 0)),
             'TurnoverLocal': cloud.get('TurnoverLocal', overall.get('Turnover', 0)),
             'IR': cloud.get('IR', overall.get('IR', 0)),
@@ -239,8 +248,8 @@ def evaluate_factor_by_market(alpha_aligned, resp_aligned, restriction_aligned):
             out[product] = {"available": True, "effective": False, "reason": str(exc)}
             continue
         daily_ic = metrics.get("daily_ic", pd.Series(dtype=float))
-        rank_ic = float(metrics.get("rank_ic", 0.0) / 100.0)
-        ic = float(cloud.get("IC", 0.0) / 100.0)
+        rank_ic = float(metrics.get("rank_ic", 0.0))
+        ic = float(cloud.get("IC", 0.0))
         ir = float(cloud.get("IR", 0.0))
         dates = sorted(pd.to_datetime(a.index.get_level_values("date")).strftime("%Y-%m-%d").unique())
         oos_ic = 0.0
@@ -457,8 +466,8 @@ if __name__ == '__main__':
     if result['status'] == 'success':
         print(f"IC:     {result['IC']:.4f}")
         print(f"RankIC: {result['rank_ic']:.4f}")
-        print(f"IR:     {result['IR']:.2f}")
-        print(f"TVR:    {result['Turnover']:.1f}")
+        print(f"ICIR:   {result['ICIR']:.2f}")
+        print(f"Turnover(diagnostic): {result['Turnover']:.1f}")
         print(f"Score:  {result['Score']:.2f}")
         print(f"Gates:  {'PASS' if result['PassGates'] else 'FAIL'}")
         print(f"Class:  {result['classification']}")

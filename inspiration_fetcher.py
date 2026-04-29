@@ -13,6 +13,7 @@ can call `start_background_fetcher()` once and forget about it.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -35,12 +36,16 @@ from autoalpha_v3.inspiration_db import (
 # an API key, so it gives the fetcher a wider outside-world idea surface.
 _ARXIV_API = "https://export.arxiv.org/api/query"
 _OPENALEX_API = "https://api.openalex.org/works"
-_ARXIV_QUERIES = [
-    'cat:q-fin.TR AND all:"futures" AND all:"order flow"',
-    'cat:q-fin.TR AND all:"commodity futures" AND all:"open interest"',
-    'cat:q-fin.PM AND all:"futures" AND all:"momentum"',
-    'cat:q-fin.ST AND all:"limit order book" AND all:"futures"',
-]
+_QFIN_CATEGORIES = ("q-fin.CP", "q-fin.EC", "q-fin.GN", "q-fin.MF", "q-fin.PM", "q-fin.PR", "q-fin.RM", "q-fin.ST", "q-fin.TR")
+_ARXIV_QUERY_TERMS = (
+    'all:futures AND all:"order flow"',
+    'all:futures AND all:"open interest"',
+    'all:futures AND all:"limit order book"',
+    'all:futures AND all:intraday AND all:momentum',
+    'all:futures AND all:"price impact"',
+    'all:futures AND all:"volume imbalance"',
+)
+_ARXIV_QUERIES = [f"cat:{cat} AND {term}" for cat in _QFIN_CATEGORIES for term in _ARXIV_QUERY_TERMS]
 _OPENALEX_QUERIES = [
     "commodity futures order flow imbalance return predictability",
     "futures open interest volume momentum reversal factor",
@@ -53,6 +58,9 @@ _VERBOSE_REJECTS = os.environ.get("AUTOALPHA_FETCHER_VERBOSE_REJECTS", "0").lowe
     "yes",
     "on",
 }
+_PAPERS_DIR = AUTOALPHA_DIR / "papers"
+_ARXIV_THROTTLE_SEC = 3.0
+_ARXIV_LAST_REQUEST = 0.0
 
 _QUANT_PAPER_KEYWORDS = (
     "futures", "commodity", "commodity futures", "return", "returns", "intraday",
@@ -146,7 +154,7 @@ def _paper_relevance_score(title: str, summary: str) -> tuple[bool, float, str]:
     hits = [kw for kw in _QUANT_PAPER_KEYWORDS if kw in text]
     rejects = [kw for kw in _QUANT_PAPER_REJECT_KEYWORDS if kw in text]
     futures_specific = any(kw in text for kw in ("future", "futures", "commodity", "open interest", "contract"))
-    has_return_signal = any(kw in text for kw in ("return", "predict", "forecast", "anomaly", "momentum", "reversal", "price discovery"))
+    has_return_signal = any(kw in text for kw in ("return", "predict", "forecast", "anomaly", "alpha", "momentum", "reversal", "price", "impact", "price discovery"))
     has_market_micro = any(kw in text for kw in ("futures", "intraday", "volume", "liquidity", "order", "price", "open interest", "book"))
     score = min(0.98, 0.25 + 0.07 * len(hits) - 0.12 * len(rejects))
     min_hits = 2 if futures_specific else 3
@@ -158,9 +166,98 @@ def _paper_relevance_score(title: str, summary: str) -> tuple[bool, float, str]:
     return keep, max(0.0, min(1.0, score)), reason
 
 
+def _arxiv_throttle() -> None:
+    global _ARXIV_LAST_REQUEST
+    elapsed = time.time() - _ARXIV_LAST_REQUEST
+    if elapsed < _ARXIV_THROTTLE_SEC:
+        time.sleep(_ARXIV_THROTTLE_SEC - elapsed)
+    _ARXIV_LAST_REQUEST = time.time()
+
+
+def _arxiv_id_from_url(source: str) -> str:
+    text = str(source or "").rstrip("/")
+    arxiv_id = text.rsplit("/", 1)[-1]
+    return re.sub(r"v\d+$", "", arxiv_id)
+
+
+def _arxiv_entry_authors(entry: ET.Element, ns: dict[str, str]) -> list[str]:
+    authors: list[str] = []
+    for item in entry.findall("atom:author", ns):
+        name = " ".join((item.findtext("atom:name", default="", namespaces=ns) or "").split())
+        if name:
+            authors.append(name)
+    return authors
+
+
+def _arxiv_entry_categories(entry: ET.Element, ns: dict[str, str]) -> list[str]:
+    categories: list[str] = []
+    for item in entry.findall("atom:category", ns):
+        term = item.attrib.get("term", "")
+        if term:
+            categories.append(term)
+    return categories
+
+
+def _arxiv_entry_pdf_url(entry: ET.Element, ns: dict[str, str]) -> str:
+    for item in entry.findall("atom:link", ns):
+        if item.attrib.get("title") == "pdf" or item.attrib.get("type") == "application/pdf":
+            return item.attrib.get("href", "")
+    return ""
+
+
+def _write_arxiv_artifacts(
+    *,
+    arxiv_id: str,
+    title: str,
+    authors: list[str],
+    summary: str,
+    categories: list[str],
+    published_date: str,
+    source: str,
+    pdf_url: str,
+    query: str,
+) -> dict[str, str]:
+    paper_dir = _PAPERS_DIR / arxiv_id.replace("/", "_")
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = paper_dir / "meta.json"
+    pdf_path = paper_dir / "paper.pdf"
+    meta = {
+        "arxiv_id": arxiv_id,
+        "title": title,
+        "authors": authors,
+        "abstract": summary,
+        "categories": categories,
+        "published": published_date,
+        "source": source,
+        "pdf_url": pdf_url,
+        "search_query": query,
+        "pipeline_reference": {
+            "paper_search": "q-fin category/keyword retrieval with dedup, metadata capture, and throttled arXiv access",
+            "paper_extract": "extract formulas/variables/metrics faithfully before any factor translation",
+            "paper_replicate": "write plan and signal pseudocode before backtest or DSL implementation",
+        },
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if pdf_url and os.environ.get("AUTOALPHA_ARXIV_DOWNLOAD_PDF", "0").lower() in {"1", "true", "yes", "on"} and not pdf_path.exists():
+        try:
+            _arxiv_throttle()
+            pdf_resp = requests.get(pdf_url, timeout=30)
+            pdf_resp.raise_for_status()
+            pdf_path.write_bytes(pdf_resp.content)
+        except Exception as exc:
+            print(f"[fetcher] arXiv pdf download failed ({arxiv_id}): {exc}")
+    return {
+        "paper_dir": str(paper_dir),
+        "meta_path": str(meta_path),
+        "pdf_path": str(pdf_path) if pdf_path.exists() else "",
+    }
+
+
 def fetch_arxiv_futures_papers(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
     """Fetch q-fin papers from arXiv as structured futures-factor inspirations."""
     try:
+        _arxiv_throttle()
         resp = requests.get(
             _ARXIV_API,
             params={
@@ -190,18 +287,35 @@ def fetch_arxiv_futures_papers(query: str, max_results: int = 8) -> List[Dict[st
         summary = _trim_text(" ".join((entry.findtext("atom:summary", default="", namespaces=ns) or "").split()), limit=700)
         source = entry.findtext("atom:id", default="", namespaces=ns) or ""
         published_date = (entry.findtext("atom:published", default="", namespaces=ns) or "")[:10]
+        authors = _arxiv_entry_authors(entry, ns)
+        categories = _arxiv_entry_categories(entry, ns)
+        pdf_url = _arxiv_entry_pdf_url(entry, ns)
+        arxiv_id = _arxiv_id_from_url(source)
         keep, score, reason = _paper_relevance_score(title, summary)
         if not keep:
             if _VERBOSE_REJECTS:
                 print(f"[fetcher] arXiv screened out: {title} ({reason})")
             continue
+        artifacts = _write_arxiv_artifacts(
+            arxiv_id=arxiv_id,
+            title=title,
+            authors=authors,
+            summary=summary,
+            categories=categories,
+            published_date=published_date,
+            source=source,
+            pdf_url=pdf_url,
+            query=query,
+        )
         records.append(_quant_paper_record(
             title=title,
             source=source,
             summary=summary,
             mechanism=(
                 "arXiv q-fin futures paper candidate. Extract only explicit formulas, variables, "
-                f"and evaluation metrics before turning it into a factor; query={query}. {reason}"
+                "and evaluation metrics before turning it into a factor. Build a plan.md-style "
+                "translation with data source, signal logic, pseudocode, benchmark and leakage checks; "
+                f"query={query}. {reason}. paper_artifacts={artifacts}"
             ),
             published_date=published_date,
             tags="paper,arxiv,q-fin,futures,structured-search",
@@ -329,7 +443,8 @@ def fetch_quant_papers(max_results: int = 12) -> List[Dict[str, Any]]:
     """Combine arXiv q-fin search, broad live search, and curated high-signal papers."""
     records: List[Dict[str, Any]] = []
     seen_sources: set[str] = set()
-    for query in _ARXIV_QUERIES:
+    query_limit = max(1, int(os.environ.get("AUTOALPHA_ARXIV_QUERY_LIMIT", "8") or 8))
+    for query in _ARXIV_QUERIES[:query_limit]:
         for rec in fetch_arxiv_futures_papers(query, max_results=4):
             source = str(rec.get("source") or "")
             if source in seen_sources:
